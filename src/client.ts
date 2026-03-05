@@ -1,52 +1,90 @@
 import { v4 as uuidv4 } from "uuid";
+import {
+  ClientFactory,
+  ClientFactoryOptions,
+  DefaultAgentCardResolver,
+  JsonRpcTransportFactory,
+  RestTransportFactory,
+  createAuthenticatingFetchWithRetry,
+  type AuthenticationHandler,
+  type HttpHeaders,
+} from "@a2a-js/sdk/client";
+import type { MessageSendParams, Message } from "@a2a-js/sdk";
 
 import type { OutboundSendResult, PeerConfig } from "./types.js";
 
-function buildAuthHeaders(peer: PeerConfig): Record<string, string> {
+/**
+ * Build an AuthenticationHandler for bearer or apiKey auth.
+ */
+function createAuthHandler(peer: PeerConfig): AuthenticationHandler | undefined {
   const auth = peer.auth;
-  if (!auth) {
-    return {};
-  }
+  if (!auth?.token) return undefined;
 
-  if (auth.type === "bearer") {
-    return {
-      authorization: `Bearer ${auth.token}`,
-    };
-  }
+  const headerKey = auth.type === "bearer" ? "authorization" : "x-api-key";
+  const headerValue = auth.type === "bearer" ? `Bearer ${auth.token}` : auth.token;
 
   return {
-    "x-api-key": auth.token,
+    headers: async (): Promise<HttpHeaders> => ({
+      [headerKey]: headerValue,
+    }),
+    shouldRetryWithHeaders: async () => undefined,
   };
 }
 
-function toJsonRpcUrl(cardUrl: string): string {
-  // Per A2A spec, the card's `url` field IS the service endpoint.
-  // Only fall back to appending /a2a/jsonrpc if the URL looks like a card discovery URL.
-  if (cardUrl.includes(".well-known")) {
-    const parsed = new URL(cardUrl);
-    return `${parsed.origin}/a2a/jsonrpc`;
-  }
-  return cardUrl;
-}
-
-async function parseJsonSafe(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
-  }
+/**
+ * Parse agentCardUrl into base URL and path.
+ */
+function parseAgentCardUrl(agentCardUrl: string): { baseUrl: string; path: string } {
+  const parsed = new URL(agentCardUrl);
+  return {
+    baseUrl: parsed.origin,
+    path: parsed.pathname,
+  };
 }
 
 export class A2AClient {
+  /**
+   * Create a ClientFactory with auth-aware fetch for a given peer.
+   */
+  private buildFactory(peer: PeerConfig): { factory: ClientFactory; path: string } {
+    const { baseUrl: _baseUrl, path } = parseAgentCardUrl(peer.agentCardUrl);
+    const authHandler = createAuthHandler(peer);
+
+    // Wrap global fetch with auth headers if configured
+    const authFetch = authHandler
+      ? createAuthenticatingFetchWithRetry(fetch, authHandler)
+      : fetch;
+
+    // Inject auth fetch into card resolver and all transports
+    const options = ClientFactoryOptions.createFrom(ClientFactoryOptions.default, {
+      cardResolver: new DefaultAgentCardResolver({ fetchImpl: authFetch }),
+      transports: [
+        new JsonRpcTransportFactory({ fetchImpl: authFetch }),
+        new RestTransportFactory({ fetchImpl: authFetch }),
+      ],
+    });
+
+    return { factory: new ClientFactory(options), path };
+  }
+
+  /**
+   * Discover a peer's Agent Card using the SDK resolver.
+   */
   async discoverAgentCard(peer: PeerConfig): Promise<Record<string, unknown>> {
-    const response = await fetch(peer.agentCardUrl, {
-      method: "GET",
-      headers: buildAuthHeaders(peer),
+    const { baseUrl, path } = parseAgentCardUrl(peer.agentCardUrl);
+    const { factory } = this.buildFactory(peer);
+
+    // createFromUrl resolves the card internally
+    const client = await factory.createFromUrl(baseUrl, path);
+
+    // Re-fetch the card for the return value (lightweight)
+    const authHandler = createAuthHandler(peer);
+    const headers: Record<string, string> = authHandler
+      ? (await authHandler.headers()) as Record<string, string>
+      : {};
+
+    const response = await fetch(`${baseUrl}${path}`, {
+      headers,
       signal: AbortSignal.timeout(30_000),
     });
 
@@ -54,41 +92,47 @@ export class A2AClient {
       throw new Error(`Agent Card lookup failed with status ${response.status}`);
     }
 
-    const payload = await parseJsonSafe(response);
-    if (!payload || typeof payload !== "object") {
-      throw new Error("Invalid Agent Card payload");
-    }
-
-    return payload as Record<string, unknown>;
+    return response.json();
   }
 
+  /**
+   * Send a message to a peer agent using the A2A SDK Client.
+   *
+   * Uses ClientFactory → createFromUrl → client.sendMessage(),
+   * following the official @a2a-js/sdk best practice.
+   */
   async sendMessage(peer: PeerConfig, message: Record<string, unknown>): Promise<OutboundSendResult> {
-    const card = await this.discoverAgentCard(peer);
-    const cardUrl = typeof card.url === "string" ? card.url : peer.agentCardUrl;
+    const { baseUrl } = parseAgentCardUrl(peer.agentCardUrl);
+    const { factory, path } = this.buildFactory(peer);
 
-    const jsonRpcRequest = {
-      jsonrpc: "2.0",
-      id: uuidv4(),
-      method: "message/send",
-      params: {
-        message,
-      },
-    };
+    try {
+      const client = await factory.createFromUrl(baseUrl, path);
 
-    const response = await fetch(toJsonRpcUrl(cardUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...buildAuthHeaders(peer),
-      },
-      body: JSON.stringify(jsonRpcRequest),
-      signal: AbortSignal.timeout(30_000),
-    });
+      const sendParams: MessageSendParams = {
+        message: {
+          kind: "message",
+          messageId: (message.messageId as string) || uuidv4(),
+          role: (message.role as Message["role"]) || "user",
+          parts: (message.parts as Message["parts"]) || [
+            { kind: "text", text: String(message.text || message.message || "") },
+          ],
+        },
+      };
 
-    return {
-      ok: response.ok,
-      statusCode: response.status,
-      response: await parseJsonSafe(response),
-    };
+      const result = await client.sendMessage(sendParams);
+
+      return {
+        ok: true,
+        statusCode: 200,
+        response: result as unknown as Record<string, unknown>,
+      };
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        statusCode: 500,
+        response: { error: errorMessage },
+      };
+    }
   }
 }
