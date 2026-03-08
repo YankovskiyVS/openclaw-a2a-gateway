@@ -9,7 +9,6 @@ const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
 const GATEWAY_CONNECT_TIMEOUT_MS = 10_000;
 const GATEWAY_REQUEST_TIMEOUT_MS = 10_000;
 const HOOKS_WAKE_TIMEOUT_MS = 5_000;
-const FALLBACK_RESPONSE_TEXT = "Request accepted (no agent dispatch available)";
 const TASK_CONTEXT_CACHE_LIMIT = 10_000;
 
 function pickAgentId(requestContext: RequestContext, fallbackAgentId: string): string {
@@ -559,15 +558,38 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     };
     eventBus.publish(workingTask);
 
-    let responseText = FALLBACK_RESPONSE_TEXT;
+    let responseText: string;
 
     try {
       responseText = await this.dispatchViaGatewayRpc(agentId, requestContext.userMessage, contextId);
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      this.api.logger.warn(`a2a-gateway: agent dispatch failed (${errorMessage}); using fallback`);
+      this.api.logger.error(`a2a-gateway: agent dispatch failed: ${errorMessage}`);
       await this.tryHooksWakeFallback(agentId, taskId, contextId, requestContext.userMessage);
-      responseText = FALLBACK_RESPONSE_TEXT;
+
+      // Return failed task status so the caller knows dispatch did not succeed.
+      const failedMessage: Message = {
+        kind: "message",
+        messageId: uuidv4(),
+        role: "agent",
+        parts: [{ kind: "text", text: `Agent dispatch failed: ${errorMessage}` }],
+        contextId,
+      };
+
+      const failedTask: Task = {
+        kind: "task",
+        id: taskId,
+        contextId,
+        status: {
+          state: "failed",
+          message: failedMessage,
+          timestamp: new Date().toISOString(),
+        },
+      };
+
+      eventBus.publish(failedTask);
+      eventBus.finished();
+      return;
     }
 
     // Publish completed Task with artifact
