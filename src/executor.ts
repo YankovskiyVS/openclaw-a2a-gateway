@@ -208,6 +208,10 @@ class GatewayRpcConnection {
   private messageListener: ((event: { data: unknown }) => void) | null;
   private closeListener: ((event: unknown) => void) | null;
 
+  private connectChallengeTimer: ReturnType<typeof setTimeout> | null;
+  private connectChallengeResolver: ((nonce: string) => void) | null;
+  private connectChallengeRejecter: ((error: Error) => void) | null;
+
   constructor(config: GatewayRuntimeConfig) {
     this.wsUrl = config.wsUrl;
     this.gatewayToken = config.gatewayToken;
@@ -216,6 +220,10 @@ class GatewayRpcConnection {
     this.socket = null;
     this.messageListener = null;
     this.closeListener = null;
+
+    this.connectChallengeTimer = null;
+    this.connectChallengeResolver = null;
+    this.connectChallengeRejecter = null;
   }
 
   async connect(): Promise<void> {
@@ -230,13 +238,18 @@ class GatewayRpcConnection {
       this.handleMessage(event);
     };
     this.closeListener = () => {
-      this.rejectAllPending(new Error("gateway connection closed"));
+      const error = new Error("gateway connection closed");
+      this.rejectConnectChallenge(error);
+      this.rejectAllPending(error);
     };
 
     socket.addEventListener("message", this.messageListener);
     socket.addEventListener("close", this.closeListener);
 
-    await new Promise<void>((resolve, reject) => {
+    const challengePromise = this.awaitConnectChallenge();
+
+    try {
+      await new Promise<void>((resolve, reject) => {
       let settled = false;
 
       const cleanup = () => {
@@ -253,6 +266,7 @@ class GatewayRpcConnection {
         clearTimeout(timer);
         cleanup();
         if (error) {
+          this.rejectConnectChallenge(error);
           reject(error);
           return;
         }
@@ -278,7 +292,14 @@ class GatewayRpcConnection {
       socket.addEventListener("open", onOpen);
       socket.addEventListener("error", onError);
       socket.addEventListener("close", onClose);
-    });
+      });
+
+      // OpenClaw Gateway uses a challenge event before accepting connect.
+      await challengePromise;
+    } catch (error) {
+      await challengePromise.catch(() => {});
+      throw error;
+    }
 
     await this.request("connect", this.buildConnectParams(), GATEWAY_CONNECT_TIMEOUT_MS, false);
   }
@@ -342,7 +363,54 @@ class GatewayRpcConnection {
       socket.close();
     }
 
-    this.rejectAllPending(new Error("gateway websocket connection closed"));
+    const error = new Error("gateway websocket connection closed");
+    this.rejectConnectChallenge(error);
+    this.rejectAllPending(error);
+  }
+
+  private awaitConnectChallenge(): Promise<void> {
+    if (this.connectChallengeRejecter) {
+      this.connectChallengeRejecter(new Error("gateway connect challenge wait superseded"));
+    }
+
+    this.clearConnectChallengeWait();
+
+    return new Promise<void>((resolve, reject) => {
+      this.connectChallengeResolver = () => {
+        this.clearConnectChallengeWait();
+        resolve();
+      };
+
+      this.connectChallengeRejecter = (error) => {
+        this.clearConnectChallengeWait();
+        reject(error);
+      };
+
+      // OpenClaw Gateway typically emits a connect.challenge event shortly after the socket opens.
+      // Use a bounded timeout so we fail fast (and can fall back) if the gateway isn't reachable.
+      const timeoutMs = 2_000;
+      this.connectChallengeTimer = setTimeout(() => {
+        this.connectChallengeRejecter?.(new Error("gateway connect challenge timed out"));
+      }, timeoutMs);
+    });
+  }
+
+  private clearConnectChallengeWait(): void {
+    if (this.connectChallengeTimer) {
+      clearTimeout(this.connectChallengeTimer);
+    }
+    this.connectChallengeTimer = null;
+    this.connectChallengeResolver = null;
+    this.connectChallengeRejecter = null;
+  }
+
+  private rejectConnectChallenge(error: Error): void {
+    if (this.connectChallengeRejecter) {
+      this.connectChallengeRejecter(error);
+      return;
+    }
+
+    this.clearConnectChallengeWait();
   }
 
   private buildConnectParams(): Record<string, unknown> {
@@ -355,8 +423,8 @@ class GatewayRpcConnection {
     }
 
     const params: Record<string, unknown> = {
-      minProtocol: 1,
-      maxProtocol: 1_000,
+      minProtocol: 3,
+      maxProtocol: 3,
       client: {
         id: "cli",
         version: "a2a-gateway-plugin",
@@ -389,7 +457,22 @@ class GatewayRpcConnection {
     }
 
     const frame = asObject(parsed);
-    if (!frame || frame.type !== "res") {
+    if (!frame) {
+      return;
+    }
+
+    if (frame.type === "event") {
+      if (frame.event === "connect.challenge") {
+        const payload = asObject(frame.payload);
+        const nonce = asString(payload?.nonce)?.trim() || "";
+        if (nonce && this.connectChallengeResolver) {
+          this.connectChallengeResolver(nonce);
+        }
+      }
+      return;
+    }
+
+    if (frame.type !== "res") {
       return;
     }
 
