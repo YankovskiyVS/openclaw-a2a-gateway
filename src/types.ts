@@ -98,6 +98,45 @@ export interface GatewayConfig {
      */
     agentResponseTimeoutMs?: number;
   };
+  resilience: PeerResilienceConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Peer resilience configuration
+// ---------------------------------------------------------------------------
+
+export interface HealthCheckConfig {
+  enabled: boolean;
+  intervalMs: number;
+  timeoutMs: number;
+}
+
+export interface RetryConfig {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+export interface CircuitBreakerConfig {
+  failureThreshold: number;
+  resetTimeoutMs: number;
+}
+
+export interface PeerResilienceConfig {
+  healthCheck: HealthCheckConfig;
+  retry: RetryConfig;
+  circuitBreaker: CircuitBreakerConfig;
+}
+
+export type CircuitState = "closed" | "open" | "half-open";
+export type HealthStatus = "healthy" | "unhealthy" | "unknown";
+
+export interface PeerState {
+  health: HealthStatus;
+  circuit: CircuitState;
+  consecutiveFailures: number;
+  lastFailureAt: number | null;
+  lastCheckAt: number | null;
 }
 
 // ---------------------------------------------------------------------------

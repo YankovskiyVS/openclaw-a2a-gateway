@@ -1,9 +1,12 @@
-import type { OpenClawPluginApi } from "./types.js";
+import type { OpenClawPluginApi, PeerState, CircuitState, HealthStatus } from "./types.js";
 import { A2AMetricsCollector } from "./internal/metrics.js";
 
 type LoggerLike = Pick<OpenClawPluginApi["logger"], "info" | "warn" | "error">;
 type LogLevel = "info" | "warn" | "error";
 type TerminalTaskState = "completed" | "failed" | "canceled" | "rejected";
+
+/** Callback to get peer states without importing PeerHealthManager directly. */
+export type PeerStateProvider = () => Map<string, PeerState>;
 
 interface HttpMetrics {
   requests_total: number;
@@ -34,10 +37,19 @@ interface TaskMetrics {
   last_finished_at?: string;
 }
 
+interface PeerMetrics {
+  health: HealthStatus;
+  circuit: CircuitState;
+  consecutive_failures: number;
+  total_retries: number;
+  last_check_at?: string;
+}
+
 export interface GatewayTelemetrySnapshot {
   protocol: ReturnType<A2AMetricsCollector["getMetrics"]>;
   http: HttpMetrics;
   tasks: TaskMetrics & { average_duration_ms: number };
+  peers: Record<string, PeerMetrics>;
 }
 
 export interface GatewayTelemetryOptions {
@@ -73,9 +85,17 @@ export class GatewayTelemetry {
     finished: 0,
   };
 
+  private readonly peerRetries: Record<string, number> = {};
+  private peerStateProvider: PeerStateProvider | null = null;
+
   constructor(logger: LoggerLike, options: GatewayTelemetryOptions = {}) {
     this.logger = logger;
     this.structuredLogs = options.structuredLogs !== false;
+  }
+
+  /** Register a callback to retrieve peer health states for the metrics snapshot. */
+  setPeerStateProvider(provider: PeerStateProvider): void {
+    this.peerStateProvider = provider;
   }
 
   recordInboundHttp(route: "jsonrpc" | "rest" | "metrics", statusCode: number, durationMs: number): void {
@@ -112,6 +132,33 @@ export class GatewayTelemetry {
       status_code: statusCode,
       duration_ms: durationMs,
     });
+  }
+
+  recordPeerHealthCheck(peerName: string, healthy: boolean): void {
+    this.log(healthy ? "info" : "warn", "peer.health", {
+      peer: peerName,
+      healthy,
+    });
+  }
+
+  recordPeerCircuitChange(peerName: string, newState: CircuitState): void {
+    this.log(newState === "closed" ? "info" : "warn", "peer.circuit", {
+      peer: peerName,
+      state: newState,
+    });
+  }
+
+  recordPeerRetry(peerName: string, attempt: number): void {
+    this.peerRetries[peerName] = (this.peerRetries[peerName] || 0) + 1;
+    this.log("warn", "peer.retry", {
+      peer: peerName,
+      attempt,
+      total_retries: this.peerRetries[peerName],
+    });
+  }
+
+  getPeerRetries(): Record<string, number> {
+    return { ...this.peerRetries };
   }
 
   recordSecurityRejection(surface: "http" | "grpc", reason: string): void {
@@ -203,6 +250,23 @@ export class GatewayTelemetry {
         ? Number((this.tasks.total_duration_ms / this.tasks.finished).toFixed(2))
         : 0;
 
+    // Build peer metrics from health manager state + retry counters
+    const peers: Record<string, PeerMetrics> = {};
+    if (this.peerStateProvider) {
+      const states = this.peerStateProvider();
+      for (const [name, state] of states) {
+        peers[name] = {
+          health: state.health,
+          circuit: state.circuit,
+          consecutive_failures: state.consecutiveFailures,
+          total_retries: this.peerRetries[name] || 0,
+          last_check_at: state.lastCheckAt
+            ? new Date(state.lastCheckAt).toISOString()
+            : undefined,
+        };
+      }
+    }
+
     return {
       protocol: this.collector.getMetrics(),
       http: { ...this.http },
@@ -210,6 +274,7 @@ export class GatewayTelemetry {
         ...this.tasks,
         average_duration_ms: averageDuration,
       },
+      peers,
     };
   }
 

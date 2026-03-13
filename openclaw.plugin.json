@@ -52,7 +52,9 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "tasksDir": { "type": "string", "default": "data/tasks" }
+          "tasksDir": { "type": "string", "default": "data/tasks" },
+          "taskTtlHours": { "type": "number", "default": 72, "minimum": 0, "description": "Task TTL in hours. 0 disables cleanup." },
+          "cleanupIntervalMinutes": { "type": "number", "default": 60, "minimum": 1, "description": "Interval in minutes between cleanup runs." }
         }
       },
       "peers": {
@@ -165,6 +167,38 @@
             "type": "number",
             "default": 300000,
             "minimum": 1000
+          }
+        }
+      },
+      "resilience": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "healthCheck": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean", "default": true },
+              "intervalMs": { "type": "number", "default": 30000, "minimum": 1000 },
+              "timeoutMs": { "type": "number", "default": 5000, "minimum": 500 }
+            }
+          },
+          "retry": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "maxRetries": { "type": "number", "default": 3, "minimum": 0 },
+              "baseDelayMs": { "type": "number", "default": 1000, "minimum": 100 },
+              "maxDelayMs": { "type": "number", "default": 10000, "minimum": 100 }
+            }
+          },
+          "circuitBreaker": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "failureThreshold": { "type": "number", "default": 5, "minimum": 1 },
+              "resetTimeoutMs": { "type": "number", "default": 30000, "minimum": 1000 }
+            }
           }
         }
       }

@@ -12,7 +12,9 @@ import {
 import { GrpcTransportFactory } from "@a2a-js/sdk/client/grpc";
 import type { MessageSendParams, Message } from "@a2a-js/sdk";
 
-import type { OutboundSendResult, PeerConfig } from "./types.js";
+import type { OutboundSendResult, PeerConfig, RetryConfig } from "./types.js";
+import type { PeerHealthManager } from "./peer-health.js";
+import { withRetry } from "./peer-retry.js";
 
 /**
  * Build an AuthenticationHandler for bearer or apiKey auth.
@@ -71,8 +73,11 @@ export class A2AClient {
 
   /**
    * Discover a peer's Agent Card using the SDK resolver.
+   * Used for both card discovery and health probes.
+   *
+   * @param timeoutMs  Override timeout (default 30s; health checks use 5s).
    */
-  async discoverAgentCard(peer: PeerConfig): Promise<Record<string, unknown>> {
+  async discoverAgentCard(peer: PeerConfig, timeoutMs = 30_000): Promise<Record<string, unknown>> {
     const { baseUrl, path } = parseAgentCardUrl(peer.agentCardUrl);
     const { factory } = this.buildFactory(peer);
 
@@ -87,7 +92,7 @@ export class A2AClient {
 
     const response = await fetch(`${baseUrl}${path}`, {
       headers,
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {
@@ -100,10 +105,58 @@ export class A2AClient {
   /**
    * Send a message to a peer agent using the A2A SDK Client.
    *
-   * Uses ClientFactory → createFromUrl → client.sendMessage(),
-   * following the official @a2a-js/sdk best practice.
+   * When a PeerHealthManager and RetryConfig are provided, the call is
+   * wrapped with circuit-breaker checks and exponential-backoff retries.
    */
-  async sendMessage(peer: PeerConfig, message: Record<string, unknown>): Promise<OutboundSendResult> {
+  async sendMessage(
+    peer: PeerConfig,
+    message: Record<string, unknown>,
+    options?: {
+      healthManager?: PeerHealthManager;
+      retryConfig?: RetryConfig;
+      log?: (level: "info" | "warn", msg: string, details?: Record<string, unknown>) => void;
+    },
+  ): Promise<OutboundSendResult> {
+    const healthManager = options?.healthManager;
+    const retryConfig = options?.retryConfig;
+
+    // Circuit breaker: reject immediately if peer is unavailable
+    if (healthManager && !healthManager.isAvailable(peer.name)) {
+      return {
+        ok: false,
+        statusCode: 503,
+        response: { error: `Circuit open: peer "${peer.name}" is unavailable` },
+      };
+    }
+
+    const doSend = () => this.doSendMessage(peer, message);
+
+    let result: OutboundSendResult;
+    if (retryConfig && retryConfig.maxRetries > 0) {
+      result = await withRetry(doSend, retryConfig, options?.log, peer.name);
+    } else {
+      result = await doSend();
+    }
+
+    // Update health manager
+    if (healthManager) {
+      if (result.ok) {
+        healthManager.recordSuccess(peer.name);
+      } else {
+        healthManager.recordFailure(peer.name);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Core send logic (no retry / circuit breaker wrapping).
+   */
+  private async doSendMessage(
+    peer: PeerConfig,
+    message: Record<string, unknown>,
+  ): Promise<OutboundSendResult> {
     const { baseUrl } = parseAgentCardUrl(peer.agentCardUrl);
     const { factory, path } = this.buildFactory(peer);
 
