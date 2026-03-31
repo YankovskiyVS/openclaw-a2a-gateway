@@ -26,8 +26,11 @@ A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that 
 ### Discovery & Resilience
 - **DNS-SD discovery**: auto-discover peers via `_a2a._tcp` SRV + TXT records
 - **mDNS self-advertisement**: publish SRV + TXT records so other gateways find you automatically
+- **Quorum-sensing discovery**: density-aware adaptive polling — short intervals when few peers are known (explore), long intervals when the network is established (stable), with Schmitt-trigger hysteresis to prevent oscillation
 - **Four-state circuit breaker**: bio-inspired desensitization model (closed → desensitized → open → recovering) with exponential recovery curve
+- **Adaptive transport selection**: per-transport success rate and latency tracking with composite scoring — transports ranked by recent performance, with static priority tie-breaking
 - **Push notifications**: webhook delivery with signal-decay importance management and decay-aware retry
+- **Michaelis-Menten soft concurrency**: progressive delay before the hard queue limit — `delay = baseDelay × load / (Km + load)` provides a soft pressure zone instead of sudden rejection
 
 ### Security & Observability
 - **Bearer token auth** with multi-token zero-downtime rotation
@@ -644,6 +647,9 @@ This gateway incorporates principles from **cell signaling biology** to improve 
 | Ligand-receptor binding | Hill equation sigmoid | **Affinity-scored routing** — multi-dimensional match scoring with configurable steepness (n) and threshold (Kd) | Hill (1910) *J Physiol* 40 |
 | Receptor desensitization | Phosphorylation → internalization → recycling | **Four-state circuit breaker** — gradual degradation (DESENSITIZED) before full block (OPEN), with exponential recovery curve | Bhalla & Bhatt (2007) *BMC Syst Biol* 1:54 |
 | cAMP degradation | Phosphodiesterase enzyme decay | **Signal decay notifications** — importance score decays exponentially; retry abandoned when below threshold | Alon (2007) *Intro to Systems Biology* Ch.4 |
+| Quorum sensing | Autoinducer concentration threshold | **Density-aware discovery** — adaptive polling with hysteresis (explore ↔ stable mode) based on peer population | Tamsir *et al.* (2011) *Nature* 469:212 |
+| Signal pathway selection | Pathway efficacy × transduction speed | **Adaptive transport** — per-transport scoring by success rate × latency factor; untested pathways get explore-first priority | Kholodenko (2006) *Nat Rev Mol Cell Biol* 7:165 |
+| Enzyme saturation | Michaelis-Menten kinetics | **Soft concurrency limiting** — progressive delay `baseDelay × load/(Km + load)` before the hard queue wall | Michaelis & Menten (1913) *Biochem Z* 49:333 |
 
 All bio-inspired features are **optional and backward-compatible** — without explicit configuration, the gateway behaves identically to standard implementations.
 
