@@ -47,7 +47,21 @@ import {
   validateUri,
   validateMimeType,
 } from "./src/file-security.js";
-import { parseRoutingRules, matchRule } from "./src/routing-rules.js";
+import {
+  parseRoutingRules,
+  matchRule,
+  matchAllRules,
+  type AffinityConfig,
+} from "./src/routing-rules.js";
+import {
+  QuorumDiscoveryManager,
+  parseQuorumConfig,
+} from "./src/quorum-discovery.js";
+import {
+  computeSaturationDelay,
+  parseSaturationConfig,
+  type SaturationConfig,
+} from "./src/saturation-model.js";
 
 /** Build a JSON-RPC error response. */
 function jsonRpcError(id: string | number | null, code: number, message: string) {
@@ -217,10 +231,29 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     routing: {
       defaultAgentId: asString(routing.defaultAgentId, "default"),
       rules: parseRoutingRules(routing.rules),
+      ...(routing.affinity != null ? {
+        affinity: (() => {
+          const aff = asObject(routing.affinity);
+          const w = asObject(aff.weights);
+          return {
+            hillCoefficient: asNumber(aff.hillCoefficient, 1),
+            kd: asNumber(aff.kd, 0.5),
+            weights: {
+              skills: asNumber(w.skills, 0.4),
+              tags: asNumber(w.tags, 0.3),
+              pattern: asNumber(w.pattern, 0.2),
+              successRate: asNumber(w.successRate, 0.1),
+            },
+          } satisfies import("./src/routing-rules.js").AffinityConfig;
+        })(),
+      } : {}),
     },
     limits: {
       maxConcurrentTasks: Math.max(1, Math.floor(asNumber(limits.maxConcurrentTasks, 4))),
       maxQueuedTasks: Math.max(0, Math.floor(asNumber(limits.maxQueuedTasks, 100))),
+      ...(limits.saturation != null ? {
+        saturation: parseSaturationConfig(asObject(limits.saturation)) ?? undefined,
+      } : {}),
     },
     observability: {
       structuredLogs: asBoolean(observability.structuredLogs, true),
@@ -262,6 +295,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
       },
     },
     discovery: parseDnsDiscoveryConfig(discoveryRaw),
+    quorum: discoveryRaw?.quorum ? parseQuorumConfig(asObject(discoveryRaw.quorum)) ?? undefined : undefined,
     advertise: buildMdnsAdvertiseConfig({
       agentCardName: asString(asObject(config.agentCard).name, "OpenClaw A2A Gateway"),
       serverHost: asString(asObject(config.server).host, "0.0.0.0"),
@@ -336,17 +370,27 @@ const plugin = {
       : null;
 
     // DNS-SD discovery manager (disabled by default)
-    const discoveryManager = config.discovery.enabled
-      ? new DnsDiscoveryManager(config.discovery, (level, msg, details) => {
-          if (level === "error") {
-            api.logger.error(details ? `${msg}: ${JSON.stringify(details)}` : msg);
-          } else if (level === "warn") {
-            api.logger.warn(details ? `${msg}: ${JSON.stringify(details)}` : msg);
-          } else {
-            api.logger.info(details ? `${msg}: ${JSON.stringify(details)}` : msg);
-          }
-        })
+    const discoveryLog = (level: "info" | "warn" | "error", msg: string, details?: Record<string, unknown>) => {
+      if (level === "error") {
+        api.logger.error(details ? `${msg}: ${JSON.stringify(details)}` : msg);
+      } else if (level === "warn") {
+        api.logger.warn(details ? `${msg}: ${JSON.stringify(details)}` : msg);
+      } else {
+        api.logger.info(details ? `${msg}: ${JSON.stringify(details)}` : msg);
+      }
+    };
+    const dnsManager = config.discovery.enabled
+      ? new DnsDiscoveryManager(config.discovery, discoveryLog)
       : null;
+
+    // Bio-inspired Quorum Sensing: when quorum config is present, wrap DNS
+    // discovery with density-aware adaptive polling (bacterial QS analogy).
+    let quorumManager: QuorumDiscoveryManager | null = null;
+    if (dnsManager && config.quorum) {
+      quorumManager = new QuorumDiscoveryManager(dnsManager, config.quorum, discoveryLog);
+    }
+    // Expose the underlying DNS manager for peer lookup regardless of quorum
+    const discoveryManager = dnsManager;
 
     // mDNS responder for self-advertisement (disabled by default)
     const mdnsResponder = config.advertise.enabled
@@ -393,7 +437,9 @@ const plugin = {
       if (pushStore.has(taskId) && (state === "completed" || state === "failed" || state === "canceled")) {
         taskStore.load(taskId).then((task) => {
           if (!task) return;
-          return pushStore.send(taskId, state, task);
+          // Bio-inspired signal decay: use decay-aware retry so stale
+          // notifications are automatically abandoned (cAMP degradation analogy).
+          return pushStore.sendWithRetry(taskId, state, task);
         }).then((result) => {
           if (result && result.ok) {
             api.logger.info(`a2a-gateway: push notification sent for task ${taskId} (${state})`);
@@ -625,13 +671,33 @@ const plugin = {
           ? (message.tags as unknown[]).filter((t): t is string => typeof t === "string")
           : [];
         const peerSkills = healthManager?.getPeerSkills();
-        const routeMatch = matchRule(config.routing.rules, { text: msgText, tags: msgTags }, peerSkills);
-        if (routeMatch) {
-          peerName = routeMatch.peer;
-          if (routeMatch.agentId && !message.agentId) {
-            message.agentId = routeMatch.agentId;
+        // Bio-inspired routing: when affinity config is present, use Hill equation
+        // scored matching (best match). Otherwise fall back to legacy first-match.
+        if (config.routing.affinity) {
+          const scored = matchAllRules(
+            config.routing.rules,
+            { text: msgText, tags: msgTags },
+            peerSkills,
+            undefined,
+            config.routing.affinity,
+          );
+          if (scored.length > 0) {
+            const best = scored[0];
+            peerName = best.peer;
+            if (best.agentId && !message.agentId) {
+              message.agentId = best.agentId;
+            }
+            api.logger.info(`a2a-gateway: affinity routing → peer="${peerName}" score=${best.score.toFixed(3)}${best.agentId ? ` agentId="${best.agentId}"` : ""}`);
           }
-          api.logger.info(`a2a-gateway: rule-based routing matched → peer="${peerName}"${routeMatch.agentId ? ` agentId="${routeMatch.agentId}"` : ""}`);
+        } else {
+          const routeMatch = matchRule(config.routing.rules, { text: msgText, tags: msgTags }, peerSkills);
+          if (routeMatch) {
+            peerName = routeMatch.peer;
+            if (routeMatch.agentId && !message.agentId) {
+              message.agentId = routeMatch.agentId;
+            }
+            api.logger.info(`a2a-gateway: rule-based routing matched → peer="${peerName}"${routeMatch.agentId ? ` agentId="${routeMatch.agentId}"` : ""}`);
+          }
         }
       }
 
@@ -787,8 +853,15 @@ const plugin = {
           return;
         }
 
-        // Start DNS-SD discovery (if enabled)
-        discoveryManager?.start();
+        // Start DNS-SD discovery (if enabled).
+        // When quorum config is present, the QuorumDiscoveryManager wraps the
+        // DNS manager and controls polling frequency adaptively; otherwise
+        // the DNS manager runs at a fixed interval.
+        if (quorumManager) {
+          quorumManager.start();
+        } else {
+          discoveryManager?.start();
+        }
 
         // Start peer health checks
         healthManager?.start();
@@ -887,8 +960,12 @@ const plugin = {
         // Stop mDNS self-advertisement (sends goodbye packet)
         mdnsResponder?.stop();
 
-        // Stop DNS-SD discovery
-        discoveryManager?.stop();
+        // Stop DNS-SD discovery (quorum manager stops the underlying DNS manager)
+        if (quorumManager) {
+          quorumManager.stop();
+        } else {
+          discoveryManager?.stop();
+        }
 
         // Stop peer health checks
         healthManager?.stop();

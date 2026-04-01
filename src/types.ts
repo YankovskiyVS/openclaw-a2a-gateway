@@ -97,10 +97,14 @@ export interface GatewayConfig {
   routing: {
     defaultAgentId: string;
     rules: import("./routing-rules.js").RoutingRule[];
+    /** Bio-inspired Hill equation affinity scoring config. When set, routing uses scored matching. */
+    affinity?: import("./routing-rules.js").AffinityConfig;
   };
   limits: {
     maxConcurrentTasks: number;
     maxQueuedTasks: number;
+    /** Bio-inspired Michaelis-Menten soft concurrency config. When set, adds progressive delay under load. */
+    saturation?: import("./saturation-model.js").SaturationConfig;
   };
   observability: {
     structuredLogs: boolean;
@@ -119,6 +123,8 @@ export interface GatewayConfig {
   resilience: PeerResilienceConfig;
   /** DNS-SD discovery configuration. Disabled by default. */
   discovery: DnsDiscoveryConfig;
+  /** Bio-inspired Quorum Sensing config for adaptive discovery polling. */
+  quorum?: import("./quorum-discovery.js").QuorumConfig;
   /** mDNS advertisement configuration. Disabled by default. */
   advertise: import("./dns-responder.js").MdnsAdvertiseConfig;
 }

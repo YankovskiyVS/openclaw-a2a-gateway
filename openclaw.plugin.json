@@ -169,6 +169,25 @@
                 "priority": { "type": "number", "default": 0, "description": "Higher = checked first" }
               }
             }
+          },
+          "affinity": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Bio-inspired Hill equation scoring for route selection (Cell Signaling → routing affinity). When configured, routes are scored and the best match is selected instead of the first match.",
+            "properties": {
+              "hillCoefficient": { "type": "number", "default": 1, "minimum": 0.1, "description": "Hill coefficient n: 1=linear (Michaelis-Menten), >1=threshold effect, <1=dispersive" },
+              "kd": { "type": "number", "default": 0.5, "minimum": 0.01, "maximum": 1, "description": "Half-saturation constant: affinity at which score = 0.5" },
+              "weights": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "skills": { "type": "number", "default": 0.4, "minimum": 0, "maximum": 1 },
+                  "tags": { "type": "number", "default": 0.3, "minimum": 0, "maximum": 1 },
+                  "pattern": { "type": "number", "default": 0.2, "minimum": 0, "maximum": 1 },
+                  "successRate": { "type": "number", "default": 0.1, "minimum": 0, "maximum": 1 }
+                }
+              }
+            }
           }
         }
       },
@@ -185,6 +204,15 @@
             "type": "number",
             "default": 100,
             "minimum": 0
+          },
+          "saturation": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Bio-inspired Michaelis-Menten soft concurrency limit (enzyme kinetics → backpressure). Adds progressive delay as load approaches capacity, instead of hard rejection.",
+            "properties": {
+              "km": { "type": "number", "default": 0.5, "minimum": 0.01, "maximum": 1, "description": "Half-saturation constant: load fraction at which delay = baseDelayMs/2" },
+              "baseDelayMs": { "type": "number", "default": 1000, "minimum": 100, "maximum": 10000, "description": "Maximum delay at full saturation (ms)" }
+            }
           }
         }
       },
@@ -311,6 +339,17 @@
             "type": "boolean",
             "default": true,
             "description": "When true, discovered peers supplement static peers config. Static peers take precedence on name collision."
+          },
+          "quorum": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Bio-inspired Quorum Sensing density-aware discovery (bacterial QS → adaptive polling). When enabled, discovery polling frequency adapts to peer density: high density → slower polling, low density → faster polling.",
+            "properties": {
+              "activateThreshold": { "type": "number", "default": 5, "minimum": 1, "description": "Peer count to enter stable mode (slower polling)" },
+              "deactivateThreshold": { "type": "number", "default": 2, "minimum": 0, "description": "Peer count to exit stable mode (must be < activateThreshold for hysteresis)" },
+              "stableIntervalMs": { "type": "number", "default": 120000, "minimum": 1000, "description": "Polling interval in stable mode (ms)" },
+              "exploreIntervalMs": { "type": "number", "default": 10000, "minimum": 1000, "description": "Polling interval in explore mode (ms)" }
+            }
           }
         }
       }

@@ -17,7 +17,9 @@ import type { PeerHealthManager } from "./peer-health.js";
 import { withRetry } from "./peer-retry.js";
 import {
   orderTransports,
+  adaptiveOrderTransports,
   isRetryableTransportError,
+  TransportStats,
   type TransportEndpoint,
 } from "./transport-fallback.js";
 
@@ -51,6 +53,22 @@ function parseAgentCardUrl(agentCardUrl: string): { baseUrl: string; path: strin
 }
 
 export class A2AClient {
+  /**
+   * Per-peer transport performance stats for adaptive ordering.
+   * Bio-inspired: cells learn which signal pathway works best for a given
+   * stimulus type and preferentially activate it (pathway selection).
+   */
+  private readonly peerTransportStats = new Map<string, TransportStats>();
+
+  private getOrCreateStats(peerName: string): TransportStats {
+    let stats = this.peerTransportStats.get(peerName);
+    if (!stats) {
+      stats = new TransportStats();
+      this.peerTransportStats.set(peerName, stats);
+    }
+    return stats;
+  }
+
   /**
    * Create a ClientFactory with auth-aware fetch for a given peer.
    */
@@ -237,7 +255,12 @@ export class A2AClient {
         }
       }
 
-      transports = orderTransports(allInterfaces);
+      // Bio-inspired: use adaptive transport ordering when we have stats
+      // for this peer (pathway selection based on past performance).
+      const stats = this.getOrCreateStats(peer.name);
+      transports = allInterfaces.some((ep) => stats.count(ep.transport) > 0)
+        ? adaptiveOrderTransports(allInterfaces, stats)
+        : orderTransports(allInterfaces);
     } catch {
       // Card resolution failed — fall back to single-transport path
       // (let the SDK pick whatever it can)
@@ -256,6 +279,8 @@ export class A2AClient {
     for (let i = 0; i < transports.length; i++) {
       const endpoint = transports[i];
 
+      const stats = this.getOrCreateStats(peer.name);
+
       log?.("info", "transport.try", {
         peer: peer.name,
         transport: endpoint.transport,
@@ -264,6 +289,7 @@ export class A2AClient {
         total: transports.length,
       });
 
+      const transportStartedAt = Date.now();
       try {
         const result = await this.doSendViaTransport(
           peer,
@@ -271,6 +297,9 @@ export class A2AClient {
           sendParams,
           requestOptions,
         );
+
+        // Record transport performance for adaptive ordering
+        stats.record(endpoint.transport, result.ok, Date.now() - transportStartedAt);
 
         // Success or non-retryable failure → return immediately
         if (result.ok || !isRetryableTransportError(result)) {
@@ -294,6 +323,9 @@ export class A2AClient {
           error: (result.response as any)?.error,
         });
       } catch (error: unknown) {
+        // Record failure for adaptive ordering
+        stats.record(endpoint.transport, false, Date.now() - transportStartedAt);
+
         if (!isRetryableTransportError(error)) {
           // Non-retryable error (auth, protocol) → stop immediately
           const errorMessage = error instanceof Error ? error.message : String(error);

@@ -9,10 +9,13 @@ import type {
 } from "@a2a-js/sdk/server";
 
 import { GatewayTelemetry } from "./telemetry.js";
+import { computeSaturationDelay, type SaturationConfig } from "./saturation-model.js";
 
 interface QueueingExecutorOptions {
   maxConcurrentTasks: number;
   maxQueuedTasks: number;
+  /** Bio-inspired Michaelis-Menten soft concurrency config. */
+  saturation?: SaturationConfig;
 }
 
 interface QueuedTaskEntry {
@@ -189,6 +192,20 @@ export class QueueingAgentExecutor implements AgentExecutor {
     let finalErrorMessage: string | undefined;
 
     this.queueDelete(requestContext.taskId);
+
+    // Bio-inspired Michaelis-Menten soft concurrency: add progressive delay
+    // under load instead of hard rejection (enzyme kinetics analogy).
+    if (this.options.saturation) {
+      const delayMs = computeSaturationDelay(
+        this.activeTasks,
+        this.options.maxConcurrentTasks,
+        this.options.saturation,
+      );
+      if (delayMs > 0) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+
     this.activeTasks += 1;
     this.telemetry.recordTaskStart(
       requestContext.taskId,
