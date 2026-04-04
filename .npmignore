@@ -1,0 +1,8 @@
+tests/
+cli/
+docs/
+research/
+.github/
+*.test.ts
+tsconfig.json
+CHANGELOG.md

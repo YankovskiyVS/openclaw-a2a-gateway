@@ -1,9 +1,23 @@
 {
-  "name": "a2a-gateway",
+  "name": "openclaw-a2a-gateway",
   "version": "1.4.0",
   "type": "module",
-  "description": "OpenClaw A2A gateway plugin implementing the A2A v0.3.0 protocol surface",
+  "description": "OpenClaw plugin implementing the A2A (Agent-to-Agent) v0.3.0 protocol — bio-inspired routing, discovery, and resilience for multi-agent ecosystems",
   "main": "index.ts",
+  "keywords": [
+    "openclaw",
+    "a2a",
+    "agent-to-agent",
+    "plugin",
+    "multi-agent",
+    "gateway"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/win4r/openclaw-a2a-gateway.git"
+  },
+  "homepage": "https://github.com/win4r/openclaw-a2a-gateway#readme",
   "scripts": {
     "test": "node --import tsx --test tests/*.test.ts"
   },
