@@ -84,6 +84,7 @@ export function createApi() {
 
 export function createMockWebSocketClass(options?: {
   onAgent?: (params: Record<string, unknown>) => void;
+  onConnect?: (params: Record<string, unknown>) => Record<string, unknown>;
   agentResponseText?: string;
   agentResponsePayloads?: Array<Record<string, unknown>>;
 }) {
@@ -117,7 +118,17 @@ export function createMockWebSocketClass(options?: {
     send(data: string): void {
       const frame = JSON.parse(data) as { id: string; method: string; params?: any };
       if (frame.method === "connect") {
-        this.respond(frame.id, true, { status: "ok" });
+        if (options?.onConnect) {
+          try {
+            const result = options.onConnect(frame.params || {});
+            this.respond(frame.id, true, result);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.respond(frame.id, false, null, { message: msg });
+          }
+        } else {
+          this.respond(frame.id, true, { status: "ok" });
+        }
         return;
       }
       if (frame.method === "sessions.resolve") {

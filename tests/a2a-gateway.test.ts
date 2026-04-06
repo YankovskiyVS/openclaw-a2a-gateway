@@ -839,3 +839,231 @@ describe("a2a-gateway plugin", () => {
     }
   });
 });
+
+describe("scope verification on connect (issue #54)", () => {
+  it("falls back to reconnect when scopes are silently downgraded", async () => {
+    const api = createApi();
+    let connectAttempts = 0;
+
+    const MockWS = createMockWebSocketClass({
+      onConnect: (params) => {
+        connectAttempts++;
+        // First connect (with device identity): return downgraded scopes
+        if (connectAttempts === 1 && params.device) {
+          return { scopes: ["operator.read"] };
+        }
+        // Reconnect (without device): return full scopes
+        return { scopes: ["operator.admin", "operator.read", "operator.write", "operator.approvals"] };
+      },
+    });
+
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = MockWS;
+
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+      const published: unknown[] = [];
+
+      await executor.execute(
+        {
+          taskId: "task-scope-1",
+          contextId: "ctx-scope-1",
+          userMessage: {
+            messageId: "msg-scope-1",
+            role: "user",
+            agentId: "writer-agent",
+            parts: [{ kind: "text", text: "test scope fallback" }],
+          },
+        } as any,
+        {
+          publish(event: unknown) { published.push(event); },
+          finished() {},
+        } as any,
+      );
+
+      // Should have connected twice: initial with device identity (downgraded),
+      // then reconnect without device identity (full scopes).
+      assert.ok(connectAttempts >= 2, `should have attempted at least 2 connects but got ${connectAttempts}`);
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
+  it("publishes failed task with clear error when both connect paths lack operator.write", async () => {
+    const api = createApi();
+
+    const MockWS = createMockWebSocketClass({
+      onConnect: () => {
+        // Always return downgraded scopes — both paths fail
+        return { scopes: ["operator.read"] };
+      },
+    });
+
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = MockWS;
+
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+      const published: unknown[] = [];
+
+      await executor.execute(
+        {
+          taskId: "task-scope-2",
+          contextId: "ctx-scope-2",
+          userMessage: {
+            messageId: "msg-scope-2",
+            role: "user",
+            agentId: "writer-agent",
+            parts: [{ kind: "text", text: "test scope error" }],
+          },
+        } as any,
+        {
+          publish(event: unknown) { published.push(event); },
+          finished() {},
+        } as any,
+      );
+
+      // The executor catches dispatch errors and publishes a "failed" task.
+      // Find the failed task event and verify the error message is actionable.
+      const failedTask = published.find((e: any) => e.status?.state === "failed") as any;
+      assert.ok(failedTask, "should publish a failed task when scopes are downgraded");
+
+      const failedText = failedTask.status?.message?.parts?.[0]?.text ?? "";
+      assert.ok(
+        failedText.includes("operator.write") || failedText.includes("scope"),
+        `failed task message should mention scope issue but got: ${failedText}`,
+      );
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
+  it("widens fallback to catch 'device not paired' error text", async () => {
+    const api = createApi();
+    let reconnected = false;
+
+    const MockWS = createMockWebSocketClass({
+      onConnect: (params) => {
+        if (params.device && !reconnected) {
+          reconnected = true;
+          throw new Error("device not paired");
+        }
+        // Reconnect without device: return full scopes
+        return { scopes: ["operator.admin", "operator.read", "operator.write"] };
+      },
+    });
+
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = MockWS;
+
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+      const published: unknown[] = [];
+
+      await executor.execute(
+        {
+          taskId: "task-scope-3",
+          contextId: "ctx-scope-3",
+          userMessage: {
+            messageId: "msg-scope-3",
+            role: "user",
+            agentId: "writer-agent",
+            parts: [{ kind: "text", text: "test device not paired" }],
+          },
+        } as any,
+        {
+          publish(event: unknown) { published.push(event); },
+          finished() {},
+        } as any,
+      );
+
+      assert.ok(reconnected, "should have triggered reconnect via 'device not paired' error");
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
+  it("does not trigger fallback when scopes include operator.write", async () => {
+    const api = createApi();
+    let connectAttempts = 0;
+
+    const MockWS = createMockWebSocketClass({
+      onConnect: () => {
+        connectAttempts++;
+        // Always return full scopes — no fallback needed
+        return { scopes: ["operator.admin", "operator.read", "operator.write"] };
+      },
+    });
+
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = MockWS;
+
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+
+      await executor.execute(
+        {
+          taskId: "task-scope-4",
+          contextId: "ctx-scope-4",
+          userMessage: {
+            messageId: "msg-scope-4",
+            role: "user",
+            agentId: "writer-agent",
+            parts: [{ kind: "text", text: "test no fallback" }],
+          },
+        } as any,
+        {
+          publish() {},
+          finished() {},
+        } as any,
+      );
+
+      // Should have connected only once — no reconnect needed
+      assert.equal(connectAttempts, 1, "should connect only once when scopes are fine");
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
+  it("does not trigger fallback when response has no scopes field (older gateway)", async () => {
+    const api = createApi();
+    let connectAttempts = 0;
+
+    const MockWS = createMockWebSocketClass({
+      onConnect: () => {
+        connectAttempts++;
+        // Older gateway: no scopes field in response
+        return { status: "ok" };
+      },
+    });
+
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = MockWS;
+
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+
+      await executor.execute(
+        {
+          taskId: "task-scope-5",
+          contextId: "ctx-scope-5",
+          userMessage: {
+            messageId: "msg-scope-5",
+            role: "user",
+            agentId: "writer-agent",
+            parts: [{ kind: "text", text: "test older gateway" }],
+          },
+        } as any,
+        {
+          publish() {},
+          finished() {},
+        } as any,
+      );
+
+      // Should have connected only once — conservatively assume scopes are fine
+      assert.equal(connectAttempts, 1, "should connect only once for older gateway without scopes");
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+});

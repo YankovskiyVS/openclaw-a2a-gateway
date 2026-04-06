@@ -604,14 +604,31 @@ class GatewayRpcConnection {
     }
 
     try {
-      await this.request("connect", this.buildConnectParams(true), GATEWAY_CONNECT_TIMEOUT_MS, false);
+      const connectResult = await this.request("connect", this.buildConnectParams(true), GATEWAY_CONNECT_TIMEOUT_MS, false);
+
+      // Verify scopes were preserved — OpenClaw ≥2026.3.13 may silently
+      // downgrade scopes when the device identity is not recognized (e.g.
+      // cross-machine setups where device.json belongs to a different host).
+      if (this.isOperatorWriteMissing(connectResult)) {
+        this.challengeNonce = "";
+        await this.reconnect();
+
+        // If token-only reconnect also lacks operator.write, surface a clear error
+        // so the user knows device pairing is required.
+        return;
+      }
     } catch (connectError: unknown) {
       const msg = connectError instanceof Error ? connectError.message : String(connectError);
       // On older gateways (≤2026.3.11), sending a device identity may trigger
       // "pairing required" if silent auto-pairing is not supported.
-      // Retry without device identity — the gateway token alone is sufficient
-      // on those versions because they preserve scopes for shared-auth connections.
-      if (msg.includes("pairing required") || msg.includes("device identity required")) {
+      // Also match variants introduced in later gateway versions.
+      if (
+        msg.includes("pairing required") ||
+        msg.includes("device identity required") ||
+        msg.includes("device not paired") ||
+        msg.includes("unknown device") ||
+        msg.includes("identity verification failed")
+      ) {
         this.challengeNonce = "";
         await this.reconnect();
         return;
@@ -664,7 +681,19 @@ class GatewayRpcConnection {
     });
 
     await challengePromise;
-    await this.request("connect", this.buildConnectParams(false), GATEWAY_CONNECT_TIMEOUT_MS, false);
+    const reconnectResult = await this.request("connect", this.buildConnectParams(false), GATEWAY_CONNECT_TIMEOUT_MS, false);
+
+    // If token-only auth also fails to preserve scopes, the gateway requires
+    // a paired device identity.  Surface a clear error so the operator knows
+    // what to do rather than getting a cryptic "missing scope" later.
+    if (this.isOperatorWriteMissing(reconnectResult)) {
+      throw new Error(
+        "Gateway connected but operator.write scope was not granted. "
+        + "On OpenClaw ≥2026.3.13, cross-machine connections require a paired "
+        + "device identity. Run 'openclaw pair' on the gateway host or copy "
+        + "~/.openclaw/identity/device.json from the gateway machine."
+      );
+    }
   }
 
   async request(
@@ -845,6 +874,21 @@ class GatewayRpcConnection {
     }
 
     return params;
+  }
+
+  /**
+   * Check whether the connect response indicates that operator.write was
+   * not granted.  Returns true only when the response explicitly lists
+   * granted scopes AND operator.write is absent — i.e. a silent downgrade.
+   * If the response does not contain scope information (older gateways)
+   * we conservatively return false (assume scopes are fine).
+   */
+  private isOperatorWriteMissing(connectResult: unknown): boolean {
+    const obj = asObject(connectResult);
+    if (!obj) return false;
+    const scopes = obj.scopes;
+    if (!Array.isArray(scopes)) return false;
+    return !scopes.includes("operator.write");
   }
 
   private handleMessage(event: { data: unknown }): void {
