@@ -97,6 +97,10 @@ export interface GatewayConfig {
   routing: {
     defaultAgentId: string;
     rules: import("./routing-rules.js").RoutingRule[];
+    /** Optional exact allowlist for inbound model override refs. Empty = allow by pattern only. */
+    modelOverrideAllowlist?: string[];
+    /** Regex pattern for inbound model override refs. */
+    modelOverridePattern?: string;
     /** Bio-inspired Hill equation affinity scoring config. When set, routing uses scored matching. */
     affinity?: import("./routing-rules.js").AffinityConfig;
   };
@@ -119,6 +123,8 @@ export interface GatewayConfig {
      * Long-running prompts should use async task mode (blocking=false) + tasks/get polling.
      */
     agentResponseTimeoutMs?: number;
+    /** Max time for OpenAI-compatible HTTP dispatch path (/v1/chat/completions). */
+    openAIRequestTimeoutMs?: number;
   };
   resilience: PeerResilienceConfig;
   /** DNS-SD discovery configuration. Disabled by default. */

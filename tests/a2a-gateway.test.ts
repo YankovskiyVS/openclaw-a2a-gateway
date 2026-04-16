@@ -166,6 +166,157 @@ describe("a2a-gateway plugin", () => {
     }
   });
 
+  it("uses OpenAI HTTP dispatch with x-openclaw-model override when metadata.llm.modelName is provided", async () => {
+    const api = createApi();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = (globalThis as any).WebSocket;
+
+    let capturedUrl = "";
+    let capturedHeaderModel = "";
+    let capturedHeaderSession = "";
+    let capturedBodyModel = "";
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      capturedUrl = typeof input === "string" ? input : input.toString();
+      const headers = new Headers(init?.headers);
+      capturedHeaderModel = headers.get("x-openclaw-model") || "";
+      capturedHeaderSession = headers.get("x-openclaw-session-key") || "";
+
+      const parsedBody = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+      capturedBodyModel = String(parsedBody.model || "");
+
+      return new Response(
+        JSON.stringify({
+          id: "resp-1",
+          object: "chat.completion",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "from openai http path" },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }) as typeof fetch;
+    (globalThis as any).WebSocket = undefined;
+
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+      const published: unknown[] = [];
+      let finishedCalled = false;
+
+      await executor.execute(
+        {
+          taskId: "task-override-1",
+          contextId: "ctx-override-1",
+          userMessage: {
+            messageId: "msg-override-1",
+            role: "user",
+            agentId: "writer-agent",
+            metadata: {
+              llm: {
+                foundationModels: {
+                  modelName: "openai/gpt-5.4",
+                },
+              },
+            },
+            parts: [{ kind: "text", text: "hello override" }],
+          },
+        } as any,
+        {
+          publish(event: unknown) {
+            published.push(event);
+          },
+          finished() {
+            finishedCalled = true;
+          },
+        } as any,
+      );
+
+      assert.equal(finishedCalled, true);
+      assert.equal(capturedUrl, "http://localhost:18789/v1/chat/completions");
+      assert.equal(capturedHeaderModel, "openai/gpt-5.4");
+      assert.equal(capturedHeaderSession, "agent:writer-agent:a2a:ctx-override-1");
+      assert.equal(capturedBodyModel, "openclaw/writer-agent");
+
+      const finalTask = published[published.length - 1] as Record<string, unknown>;
+      const status = finalTask.status as Record<string, unknown>;
+      const message = status.message as Record<string, unknown>;
+      const parts = message.parts as Array<Record<string, unknown>>;
+      assert.equal(parts[0].text, "from openai http path");
+    } finally {
+      globalThis.fetch = originalFetch;
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
+  it("fails task when model override is invalid by pattern", async () => {
+    const api = createApi();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = (globalThis as any).WebSocket;
+    let fetchCalled = false;
+
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      fetchCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    (globalThis as any).WebSocket = undefined;
+
+    try {
+      const executor = new OpenClawAgentExecutor(
+        api,
+        makeConfig({
+          routing: {
+            defaultAgentId: "default-agent",
+            modelOverridePattern: "^[a-z]+/[a-z]+$",
+          },
+        }) as unknown as GatewayConfig,
+      );
+      const published: unknown[] = [];
+
+      await executor.execute(
+        {
+          taskId: "task-invalid-model",
+          contextId: "ctx-invalid-model",
+          userMessage: {
+            messageId: "msg-invalid-model",
+            role: "user",
+            agentId: "writer-agent",
+            metadata: {
+              llm: {
+                foundationModels: {
+                  modelName: "INVALID MODEL",
+                },
+              },
+            },
+            parts: [{ kind: "text", text: "hello" }],
+          },
+        } as any,
+        {
+          publish(event: unknown) {
+            published.push(event);
+          },
+          finished() {},
+        } as any,
+      );
+
+      assert.equal(fetchCalled, false);
+      const finalTask = published[published.length - 1] as Record<string, unknown>;
+      const status = finalTask.status as Record<string, unknown>;
+      assert.equal(status.state, "failed");
+      const message = status.message as Record<string, unknown>;
+      const parts = message.parts as Array<Record<string, unknown>>;
+      assert.match(String(parts[0].text || ""), /model override is invalid/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
   it("publishes fallback response when gateway RPC is unavailable", async () => {
     const api = createApi();
 

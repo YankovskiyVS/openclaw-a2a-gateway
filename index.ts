@@ -134,6 +134,23 @@ function normalizeAgentNameOnMessage(
   }
 }
 
+function normalizeModelHintsOnMessage(
+  message: Record<string, unknown>,
+  metadata: Record<string, unknown>,
+): void {
+  const messageMetadata = asObject(message.metadata);
+  if (!message.metadata || typeof message.metadata !== "object") {
+    message.metadata = messageMetadata;
+  }
+
+  if (messageMetadata.llm == null && metadata.llm != null) {
+    messageMetadata.llm = metadata.llm;
+  }
+  if (messageMetadata.model == null && metadata.model != null) {
+    messageMetadata.model = metadata.model;
+  }
+}
+
 /**
  * Normalize inbound transport payloads so routing target can be provided via metadata.
  *
@@ -150,6 +167,7 @@ export function normalizeAgentNameFromMetadata(body: unknown): void {
   const jsonRpcMetadata = asObject(params.metadata);
   if (Object.keys(jsonRpcMessage).length > 0 && Object.keys(jsonRpcMetadata).length > 0) {
     normalizeAgentNameOnMessage(jsonRpcMessage, jsonRpcMetadata);
+    normalizeModelHintsOnMessage(jsonRpcMessage, jsonRpcMetadata);
   }
 
   // REST envelope
@@ -157,6 +175,7 @@ export function normalizeAgentNameFromMetadata(body: unknown): void {
   const restMetadata = asObject(root.metadata);
   if (Object.keys(restMessage).length > 0 && Object.keys(restMetadata).length > 0) {
     normalizeAgentNameOnMessage(restMessage, restMetadata);
+    normalizeModelHintsOnMessage(restMessage, restMetadata);
   }
 }
 
@@ -276,6 +295,13 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     routing: {
       defaultAgentId: asString(routing.defaultAgentId, "main"),
       rules: parseRoutingRules(routing.rules),
+      modelOverrideAllowlist: Array.isArray(routing.modelOverrideAllowlist)
+        ? (routing.modelOverrideAllowlist as unknown[])
+            .filter((v): v is string => typeof v === "string")
+            .map((v) => v.trim())
+            .filter((v) => v.length > 0)
+        : [],
+      modelOverridePattern: asString(routing.modelOverridePattern, "^[A-Za-z0-9._:-]+(?:/[A-Za-z0-9._:-]+)*$"),
       ...(routing.affinity != null ? {
         affinity: (() => {
           const aff = asObject(routing.affinity);
@@ -313,6 +339,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     },
     timeouts: {
       agentResponseTimeoutMs: asNumber(timeouts.agentResponseTimeoutMs, 300_000),
+      openAIRequestTimeoutMs: asNumber(timeouts.openAIRequestTimeoutMs, 60_000),
     },
     resilience: {
       healthCheck: {
