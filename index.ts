@@ -116,6 +116,50 @@ function resolveConfiguredPath(
   return path.isAbsolute(resolved) ? resolved : path.resolve(resolved);
 }
 
+function normalizeAgentNameOnMessage(
+  message: Record<string, unknown>,
+  metadata: Record<string, unknown>,
+): void {
+  const currentAgentName = asString(message.agentName, "");
+  const currentAgentId = asString(message.agentId, "");
+  if (currentAgentName || currentAgentId) {
+    return;
+  }
+
+  const metadataAgentName = asString(metadata.agentName, "");
+  const metadataAgentId = asString(metadata.agentId, "");
+  const targetAgentName = metadataAgentName || metadataAgentId;
+  if (targetAgentName) {
+    message.agentName = targetAgentName;
+  }
+}
+
+/**
+ * Normalize inbound transport payloads so routing target can be provided via metadata.
+ *
+ * Supported forms:
+ * - JSON-RPC: body.params.message + body.params.metadata.agentName
+ * - REST: body.message + body.metadata.agentName
+ */
+export function normalizeAgentNameFromMetadata(body: unknown): void {
+  const root = asObject(body);
+
+  // JSON-RPC envelope
+  const params = asObject(root.params);
+  const jsonRpcMessage = asObject(params.message);
+  const jsonRpcMetadata = asObject(params.metadata);
+  if (Object.keys(jsonRpcMessage).length > 0 && Object.keys(jsonRpcMetadata).length > 0) {
+    normalizeAgentNameOnMessage(jsonRpcMessage, jsonRpcMetadata);
+  }
+
+  // REST envelope
+  const restMessage = asObject(root.message);
+  const restMetadata = asObject(root.metadata);
+  if (Object.keys(restMessage).length > 0 && Object.keys(restMetadata).length > 0) {
+    normalizeAgentNameOnMessage(restMessage, restMetadata);
+  }
+}
+
 function parseAgentCard(raw: Record<string, unknown>): AgentCardConfig {
   const skills = Array.isArray(raw.skills) ? raw.skills : [];
 
@@ -462,7 +506,11 @@ const plugin = {
 
     // SDK expects userBuilder(req) -> Promise<User>
     // When bearer auth is configured, validate the Authorization header.
-    const userBuilder = async (req: { headers?: Record<string, string | string[] | undefined> }) => {
+    const userBuilder = async (req: { headers?: Record<string, string | string[] | undefined>; body?: unknown }) => {
+      // Accept agentName routing target from metadata for clients that place it
+      // outside of message (params.metadata.agentName in JSON-RPC).
+      normalizeAgentNameFromMetadata(req.body);
+
       if (config.security.inboundAuth === "bearer" && config.security.validTokens.size > 0) {
         const authHeader = req.headers?.authorization;
         const header = Array.isArray(authHeader) ? authHeader[0] : authHeader;
