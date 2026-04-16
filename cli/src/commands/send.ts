@@ -32,7 +32,8 @@ export function register(program: Command): void {
     .option("--wait", "when non-blocking, poll until terminal state")
     .option("--timeout <ms>", "max wait time in ms", "120000")
     .option("--poll <ms>", "poll interval in ms", "2000")
-    .option("--agent-id <id>", "route to a specific OpenClaw agentId")
+    .option("--agent-name <name>", "route to a specific OpenClaw agentName")
+    .option("--agent-id <id>", "[deprecated] alias for --agent-name")
     .option("--task-id <id>", "continue an existing task (follow-up turn)")
     .option("--context-id <id>", "reuse an existing context for multi-round routing")
     .option("--json", "output raw JSON")
@@ -48,7 +49,12 @@ export function register(program: Command): void {
         const wait = Boolean(opts.wait);
         const timeoutMs = Number(opts.timeout) || 120_000;
         const pollMs = Number(opts.poll) || 2_000;
-        const agentId = (opts["agent-id"] as string) ?? (opts.agentId as string) ?? "";
+        const agentName =
+          (opts["agent-name"] as string) ??
+          (opts.agentName as string) ??
+          (opts["agent-id"] as string) ??
+          (opts.agentId as string) ??
+          "";
         const taskId = (opts["task-id"] as string) ?? (opts.taskId as string) ?? "";
         const contextId = (opts["context-id"] as string) ?? (opts.contextId as string) ?? "";
 
@@ -66,7 +72,7 @@ export function register(program: Command): void {
           };
           if (taskId) outboundMessage.taskId = taskId.slice(0, 256);
           if (contextId) outboundMessage.contextId = contextId.slice(0, 256);
-          if (agentId) outboundMessage.agentId = agentId;
+          if (agentName) outboundMessage.agentName = agentName;
 
           const sendParams: Record<string, unknown> = {
             message: outboundMessage,

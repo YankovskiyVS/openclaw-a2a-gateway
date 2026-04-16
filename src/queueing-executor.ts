@@ -292,6 +292,21 @@ export class QueueingAgentExecutor implements AgentExecutor {
 
   private pickAgentId(requestContext: RequestContext): string {
     const message = requestContext.userMessage as unknown as Record<string, unknown> | undefined;
-    return typeof message?.agentId === "string" ? message.agentId : this.defaultAgentId;
+    const metadata = message && typeof message.metadata === "object" && message.metadata
+      ? (message.metadata as Record<string, unknown>)
+      : undefined;
+    if (typeof message?.agentName === "string") {
+      return message.agentName;
+    }
+    if (typeof message?.agentId === "string") {
+      return message.agentId;
+    }
+    if (typeof metadata?.agentName === "string") {
+      return metadata.agentName;
+    }
+    if (typeof metadata?.agentId === "string") {
+      return metadata.agentId;
+    }
+    return this.defaultAgentId;
   }
 }

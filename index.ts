@@ -669,6 +669,13 @@ const plugin = {
       const payload = asObject(params);
       let peerName = asString(payload.peer || payload.name, "");
       const message = asObject(payload.message || payload.payload);
+      const existingAgentName = asString(message.agentName, "");
+      const existingAgentId = asString(message.agentId, "");
+
+      // Canonical routing field is agentName. Keep agentId as backward-compatible input.
+      if (!existingAgentName && existingAgentId) {
+        message.agentName = existingAgentId;
+      }
 
       // Rule-based routing: auto-select peer when not explicitly provided
       if (!peerName && config.routing.rules.length > 0) {
@@ -691,19 +698,19 @@ const plugin = {
           if (scored.length > 0) {
             const best = scored[0];
             peerName = best.peer;
-            if (best.agentId && !message.agentId) {
-              message.agentId = best.agentId;
+            if (best.agentId && !asString(message.agentName, "") && !asString(message.agentId, "")) {
+              message.agentName = best.agentId;
             }
-            api.logger.info(`a2a-gateway: affinity routing → peer="${peerName}" score=${best.score.toFixed(3)}${best.agentId ? ` agentId="${best.agentId}"` : ""}`);
+            api.logger.info(`a2a-gateway: affinity routing → peer="${peerName}" score=${best.score.toFixed(3)}${best.agentId ? ` agentName="${best.agentId}"` : ""}`);
           }
         } else {
           const routeMatch = matchRule(config.routing.rules, { text: msgText, tags: msgTags }, peerSkills);
           if (routeMatch) {
             peerName = routeMatch.peer;
-            if (routeMatch.agentId && !message.agentId) {
-              message.agentId = routeMatch.agentId;
+            if (routeMatch.agentId && !asString(message.agentName, "") && !asString(message.agentId, "")) {
+              message.agentName = routeMatch.agentId;
             }
-            api.logger.info(`a2a-gateway: rule-based routing matched → peer="${peerName}"${routeMatch.agentId ? ` agentId="${routeMatch.agentId}"` : ""}`);
+            api.logger.info(`a2a-gateway: rule-based routing matched → peer="${peerName}"${routeMatch.agentId ? ` agentName="${routeMatch.agentId}"` : ""}`);
           }
         }
       }
@@ -769,7 +776,8 @@ const plugin = {
           name: { type: "string" as const, description: "Filename (e.g. report.pdf)" },
           mimeType: { type: "string" as const, description: "MIME type (e.g. application/pdf). Auto-detected from extension if omitted." },
           text: { type: "string" as const, description: "Optional text message to include alongside the file" },
-          agentId: { type: "string" as const, description: "Route to a specific agentId on the peer (OpenClaw extension). Omit to use the peer's default agent." },
+          agentName: { type: "string" as const, description: "Route to a specific agentName on the peer (OpenClaw extension). Omit to use the peer's default agent." },
+          agentId: { type: "string" as const, description: "[Deprecated] Use agentName. Route to a specific agentName on the peer." },
         },
       };
 
@@ -820,8 +828,9 @@ const plugin = {
 
           try {
             const message: Record<string, unknown> = { parts };
-            if (params.agentId) {
-              message.agentId = params.agentId;
+            const targetAgentName = asString(params.agentName, "") || asString(params.agentId, "");
+            if (targetAgentName) {
+              message.agentName = targetAgentName;
             }
             const result = await client.sendMessage(peer, message, {
               healthManager: healthManager ?? undefined,

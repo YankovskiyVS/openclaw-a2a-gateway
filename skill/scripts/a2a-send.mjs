@@ -24,9 +24,10 @@
  *   --help                  Show this help text
  *
  * Optional (OpenClaw extension):
- *   --agent-id <agentId>    Route the inbound A2A request to a specific OpenClaw agentId on the peer.
- *                           Note: this works reliably over JSON-RPC/REST. gRPC transport may drop unknown
- *                           Message fields, so gRPC is disabled when --agent-id is used.
+ *   --agent-name <agentName> Route the inbound A2A request to a specific OpenClaw agentName on the peer.
+ *   --agent-id <agentId>     [Deprecated] Alias for --agent-name.
+ *                            Note: this works reliably over JSON-RPC/REST. gRPC transport may drop unknown
+ *                            Message fields, so gRPC is disabled when --agent-name/--agent-id is used.
  *
  * Requires: npm install @a2a-js/sdk
  */
@@ -45,7 +46,7 @@ import { readFileSync, statSync } from "node:fs";
 import { extname } from "node:path";
 import { resolveConnection } from "./a2a-peers.mjs";
 
-const USAGE = `Usage: node a2a-send.mjs [--peer <name> | --peer-url <URL>] --message <TEXT> [--file-uri <url>] [--file-path <localpath>] [--task-id <id>] [--context-id <id>] [--non-blocking] [--wait] [--stream] [--timeout-ms <ms>] [--poll-ms <ms>] [--agent-id <openclaw-agent-id>] [--help]`;
+const USAGE = `Usage: node a2a-send.mjs [--peer <name> | --peer-url <URL>] --message <TEXT> [--file-uri <url>] [--file-path <localpath>] [--task-id <id>] [--context-id <id>] [--non-blocking] [--wait] [--stream] [--timeout-ms <ms>] [--poll-ms <ms>] [--agent-name <openclaw-agent-name>] [--agent-id <deprecated-alias>] [--help]`;
 
 const MAX_INLINE_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -162,7 +163,7 @@ async function main() {
 
   const { url: peerUrl, token } = resolveConnection(opts);
   const message = opts.message;
-  const targetAgentId = (opts["agent-id"] || opts.agentId || "").toString().trim();
+  const targetAgentName = (opts["agent-name"] || opts.agentName || opts["agent-id"] || opts.agentId || "").toString().trim();
   const continuationTaskId = (opts["task-id"] || opts.taskId || "").toString().trim().slice(0, 256);
   const continuationContextId = (opts["context-id"] || opts.contextId || "").toString().trim().slice(0, 256);
 
@@ -198,9 +199,9 @@ async function main() {
     ? createAuthenticatingFetchWithRetry(fetch, authHandler)
     : fetch;
 
-  // If using OpenClaw extension agentId routing, disable gRPC transport to avoid
+  // If using OpenClaw extension agentName routing, disable gRPC transport to avoid
   // protobuf dropping unknown message fields.
-  const transports = targetAgentId
+  const transports = targetAgentName
     ? [
         new JsonRpcTransportFactory({ fetchImpl: authFetch }),
         new RestTransportFactory({ fetchImpl: authFetch }),
@@ -269,7 +270,7 @@ async function main() {
     parts: outboundParts,
     ...(continuationTaskId ? { taskId: continuationTaskId } : {}),
     ...(continuationContextId ? { contextId: continuationContextId } : {}),
-    ...(targetAgentId ? { agentId: targetAgentId } : {}),
+    ...(targetAgentName ? { agentName: targetAgentName } : {}),
   };
 
   const requestOptions = token ? { serviceParameters: { authorization: `Bearer ${token}` } } : undefined;

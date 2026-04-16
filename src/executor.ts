@@ -46,7 +46,18 @@ interface AgentResponse {
 
 function pickAgentId(requestContext: RequestContext, fallbackAgentId: string): string {
   const msg = requestContext.userMessage as unknown as Record<string, unknown> | undefined;
-  const explicit = msg && typeof msg.agentId === "string" ? msg.agentId : "";
+  const metadata = msg && typeof msg.metadata === "object" && msg.metadata
+    ? (msg.metadata as Record<string, unknown>)
+    : undefined;
+  const explicit = msg && typeof msg.agentName === "string"
+    ? msg.agentName
+    : msg && typeof msg.agentId === "string"
+      ? msg.agentId
+      : metadata && typeof metadata.agentName === "string"
+        ? metadata.agentName
+        : metadata && typeof metadata.agentId === "string"
+          ? metadata.agentId
+          : "";
   return explicit || fallbackAgentId;
 }
 

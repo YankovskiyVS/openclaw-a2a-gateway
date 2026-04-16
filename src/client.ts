@@ -226,7 +226,12 @@ export class A2AClient {
     // ------------------------------------------------------------------
     // 1. Build the outbound A2A message (shared across all transports)
     // ------------------------------------------------------------------
-    const targetAgentId = typeof (message as any)?.agentId === "string" ? String((message as any).agentId) : "";
+    const rawAgentName = typeof (message as any)?.agentName === "string"
+      ? (message as any).agentName
+      : typeof (message as any)?.agentId === "string"
+        ? (message as any).agentId
+        : "";
+    const targetAgentName = rawAgentName ? String(rawAgentName) : "";
 
     const outboundMessage: any = {
       kind: "message",
@@ -237,8 +242,8 @@ export class A2AClient {
       ],
     };
 
-    if (targetAgentId) {
-      outboundMessage.agentId = targetAgentId;
+    if (targetAgentName) {
+      outboundMessage.agentName = targetAgentName;
     }
 
     const sendParams: MessageSendParams = {

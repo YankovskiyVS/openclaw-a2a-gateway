@@ -170,21 +170,21 @@ If you still see `Request accepted (no agent dispatch available)`, the underlyin
 
 - `plugins.entries.a2a-gateway.config.timeouts.agentResponseTimeoutMs` (default: 300000)
 
-### Optional: Route to a specific OpenClaw agentId (OpenClaw extension)
+### Optional: Route to a specific OpenClaw agentName (OpenClaw extension)
 
 By default, the peer will route inbound A2A messages to `routing.defaultAgentId`.
 
-To route a single request to a specific agentId (e.g., `coder`) on the peer, pass `--agent-id`:
+To route a single request to a specific agentName (e.g., `coder`) on the peer, pass `--agent-name`:
 
 ```bash
 node <WORKSPACE>/plugins/a2a-gateway/skill/scripts/a2a-send.mjs \
   --peer-url http://<PEER_IP>:18800 \
   --token <PEER_TOKEN> \
-  --agent-id coder \
+  --agent-name coder \
   --message "Run tests and summarize failures"
 ```
 
-Note: this uses a non-standard `message.agentId` field understood by the OpenClaw A2A Gateway plugin. It is most reliable over JSON-RPC/REST. gRPC transport may drop unknown Message fields.
+Note: this uses a non-standard `message.agentName` field understood by the OpenClaw A2A Gateway plugin. The legacy `message.agentId` alias is still accepted for backward compatibility. It is most reliable over JSON-RPC/REST. gRPC transport may drop unknown Message fields.
 
 ## Network: Tailscale Setup (if needed)
 

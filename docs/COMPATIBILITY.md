@@ -85,7 +85,7 @@ The `tests/compat-matrix.test.ts` file validates the following cross-implementat
 
 ## Known Interoperability Notes
 
-1. **gRPC transport**: The `message.agentId` extension field (OpenClaw-specific) may be dropped by implementations using strict protobuf Message definitions. Use JSON-RPC or REST transport when `agentId` routing is needed.
+1. **gRPC transport**: The `message.agentName` extension field (OpenClaw-specific) may be dropped by implementations using strict protobuf Message definitions. Use JSON-RPC or REST transport when `agentName` routing is needed.
 
 2. **Agent Card path**: This gateway serves the Agent Card at both `/.well-known/agent-card.json` (current spec) and `/.well-known/agent.json` (legacy). Some older implementations may only check the legacy path.
 

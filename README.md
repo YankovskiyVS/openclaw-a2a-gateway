@@ -23,7 +23,7 @@ A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that 
 - **Rule-based routing**: auto-select peer by message pattern, tags, or peer skills
 - **Hill equation affinity scoring**: multi-dimensional routing with sigmoid scoring — skills, tags, pattern, and success rate weighted via `score = affinity^n / (Kd^n + affinity^n)` ([Hill, 1910](https://en.wikipedia.org/wiki/Hill_equation_(biochemistry)))
 - **Peer skills caching**: Agent Card skills extracted during health checks, enabling skills-based routing
-- **Per-message agentId targeting**: route to specific OpenClaw agents on the peer (OpenClaw extension)
+- **Per-message agentName targeting**: route to specific OpenClaw agents on the peer (OpenClaw extension)
 
 ### Discovery & Resilience
 - **DNS-SD discovery**: auto-discover peers via `_a2a._tcp` SRV + TXT records
@@ -252,21 +252,21 @@ This sends `configuration.blocking=false` and then polls `tasks/get` until the t
 
 Tip: the default `--timeout-ms` for the script is 10 minutes; override it for very long tasks.
 
-### Target a specific OpenClaw agentId (OpenClaw extension)
+### Target a specific OpenClaw agentName (OpenClaw extension)
 
 By default, the peer routes inbound A2A messages to `routing.defaultAgentId` (often `main`).
 
-To route a single request to a specific OpenClaw `agentId` on the peer, pass `--agent-id`:
+To route a single request to a specific OpenClaw `agentName` on the peer, pass `--agent-name`:
 
 ```bash
 node <PLUGIN_PATH>/skill/scripts/a2a-send.mjs \
   --peer-url http://<PEER_IP>:18800 \
   --token <PEER_TOKEN> \
-  --agent-id coder \
+  --agent-name coder \
   --message "Run a health check"
 ```
 
-This is implemented as a non-standard `message.agentId` field understood by this plugin. It is most reliable over JSON-RPC/REST. gRPC transport may drop unknown Message fields.
+This is implemented as a non-standard `message.agentName` field understood by this plugin. The legacy `message.agentId` alias is still accepted for backward compatibility. It is most reliable over JSON-RPC/REST. gRPC transport may drop unknown Message fields.
 
 ### Agent-side runtime awareness (TOOLS.md)
 
@@ -295,8 +295,8 @@ node <PLUGIN_PATH>/skill/scripts/a2a-send.mjs \
   --token <PEER_TOKEN> \
   --message "YOUR MESSAGE HERE"
 
-# Optional (OpenClaw extension): route to a specific peer agentId
-#  --agent-id coder
+# Optional (OpenClaw extension): route to a specific peer agentName
+#  --agent-name coder
 \```
 
 The script auto-discovers the Agent Card, handles auth, and prints the peer's response text.
@@ -330,7 +330,8 @@ The plugin registers an `a2a_send_file` tool that agents can call to send files 
 | `name` | No | Filename (e.g., `report.pdf`) |
 | `mimeType` | No | MIME type (auto-detected from extension if omitted) |
 | `text` | No | Optional text message alongside the file |
-| `agentId` | No | Route to a specific agentId on the peer (OpenClaw extension) |
+| `agentName` | No | Route to a specific agentName on the peer (OpenClaw extension) |
+| `agentId` | No | Deprecated alias for `agentName` |
 
 Example agent interaction:
 - User: "Send the test report to AWS-bot"

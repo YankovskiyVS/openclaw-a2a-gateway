@@ -105,7 +105,8 @@ export function register(program: Command): void {
     )
     .argument("<target>", "peer alias or URL")
     .argument("<message>", "text message to send")
-    .option("--agent-id <id>", "route to a specific OpenClaw agentId")
+    .option("--agent-name <name>", "route to a specific OpenClaw agentName")
+    .option("--agent-id <id>", "[deprecated] alias for --agent-name")
     .option("--task-id <id>", "continue an existing task")
     .option("--context-id <id>", "reuse an existing context")
     .option("--json", "output raw JSON trace")
@@ -117,8 +118,12 @@ export function register(program: Command): void {
       ) => {
         const globalOpts = (program as any)._globalOpts ?? {};
         const jsonMode = Boolean(opts.json || globalOpts.json);
-        const agentId =
-          (opts["agent-id"] as string) ?? (opts.agentId as string) ?? "";
+        const agentName =
+          (opts["agent-name"] as string) ??
+          (opts.agentName as string) ??
+          (opts["agent-id"] as string) ??
+          (opts.agentId as string) ??
+          "";
         const taskId =
           (opts["task-id"] as string) ?? (opts.taskId as string) ?? "";
         const contextId =
@@ -187,7 +192,7 @@ export function register(program: Command): void {
           };
           if (taskId) outMsg.taskId = taskId.slice(0, 256);
           if (contextId) outMsg.contextId = contextId.slice(0, 256);
-          if (agentId) outMsg.agentId = agentId;
+          if (agentName) outMsg.agentName = agentName;
 
           const reqOpts = requestOptions(token);
           t0 = Date.now();

@@ -735,7 +735,7 @@ describe("a2a-gateway plugin", () => {
       const result = await invokeGatewayMethod(harness, "a2a.send", {
         peer: "peer-1",
         message: {
-          agentId: "peer-agent",
+          agentName: "peer-agent",
           text: "ping",
         },
       });
@@ -749,14 +749,14 @@ describe("a2a-gateway plugin", () => {
 
       const msg = (params as any)?.message as Record<string, unknown>;
       assert.equal(typeof msg, "object");
-      // OpenClaw extension: agentId should be forwarded for peer-side routing.
-      assert.equal(msg.agentId, "peer-agent");
+      // OpenClaw extension: agentName should be forwarded for peer-side routing.
+      assert.equal(msg.agentName, "peer-agent");
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  it("a2a_send_file tool forwards agentId to peer", async () => {
+  it("a2a_send_file tool forwards agentName to peer", async () => {
     const received: Array<Record<string, unknown>> = [];
 
     const originalFetch = globalThis.fetch;
@@ -814,7 +814,7 @@ describe("a2a-gateway plugin", () => {
         uri: "https://example.com/report.pdf",
         name: "report.pdf",
         mimeType: "application/pdf",
-        agentId: "coder",
+        agentName: "coder",
       });
 
       assert.ok(result.details.ok, "tool call should succeed");
@@ -823,8 +823,8 @@ describe("a2a-gateway plugin", () => {
       const params = received[0].params as Record<string, unknown>;
       const msg = (params as any)?.message as Record<string, unknown>;
 
-      // Verify agentId is forwarded
-      assert.equal(msg.agentId, "coder", "agentId should be forwarded to peer");
+      // Verify agentName is forwarded
+      assert.equal(msg.agentName, "coder", "agentName should be forwarded to peer");
 
       // Verify FilePart structure
       const parts = msg.parts as Array<Record<string, unknown>>;
