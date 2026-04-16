@@ -791,10 +791,17 @@ class GatewayRpcConnection {
       };
 
       // OpenClaw Gateway typically emits a connect.challenge event shortly after the socket opens.
-      // Use a bounded timeout so we fail fast (and can fall back) if the gateway isn't reachable.
+      // Some gateway versions/paths may not emit connect.challenge. Treat timeout as
+      // a soft fallback (continue without device nonce) instead of failing connect.
       const timeoutMs = 2_000;
       this.connectChallengeTimer = setTimeout(() => {
-        this.connectChallengeRejecter?.(new Error("gateway connect challenge timed out"));
+        const resolver = this.connectChallengeResolver;
+        if (!resolver) {
+          return;
+        }
+        this.challengeNonce = "";
+        this.clearConnectChallengeWait();
+        resolver("");
       }, timeoutMs);
     });
   }
