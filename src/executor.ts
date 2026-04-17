@@ -17,10 +17,14 @@ import {
 } from "./file-security.js";
 
 const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
+const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 60_000;
 const GATEWAY_CONNECT_TIMEOUT_MS = 10_000;
 const GATEWAY_REQUEST_TIMEOUT_MS = 10_000;
 const HOOKS_WAKE_TIMEOUT_MS = 5_000;
 const TASK_CONTEXT_CACHE_LIMIT = 10_000;
+const MODEL_ID_PREFIX = "cloudru/";
+const OPENCLAW_MODEL_ID_PREFIX = "openclaw/";
+const OPENCLAW_DEFAULT_MODEL_ID = `${OPENCLAW_MODEL_ID_PREFIX}default`;
 
 /**
  * Interval for SSE heartbeat events during agent dispatch.
@@ -84,6 +88,91 @@ function asFiniteNumber(value: unknown): number | undefined {
   }
 
   return value;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function extractModelOverride(userMessage: unknown): string | undefined {
+  const msg = asObject(userMessage);
+  const metadata = asObject(msg?.metadata);
+  const llm = asObject(metadata?.llm);
+  const foundationModels = asObject(llm?.foundationModels);
+
+  const candidates = [
+    asString(foundationModels?.modelName),
+    asString(llm?.model),
+    asString(metadata?.model),
+  ];
+  for (const candidate of candidates) {
+    if (candidate) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function validateModelOverride(
+  modelRef: string,
+  allowlist: string[],
+  pattern: RegExp,
+): string {
+  const normalized = modelRef.trim();
+  if (!normalized) {
+    throw new Error("model override is empty");
+  }
+  if (!pattern.test(normalized)) {
+    throw new Error(`model override is invalid: ${normalized}`);
+  }
+  if (allowlist.length > 0 && !allowlist.includes(normalized)) {
+    throw new Error(`model override is not allowed: ${normalized}`);
+  }
+  return normalized;
+}
+
+function withModelIdPrefix(modelRef: string): string {
+  const trimmed = modelRef.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (trimmed.startsWith(MODEL_ID_PREFIX)) {
+    return trimmed;
+  }
+  return `${MODEL_ID_PREFIX}${trimmed}`;
+}
+
+function extractOpenAIMessageContentText(messageContent: unknown): string {
+  if (typeof messageContent === "string") {
+    return messageContent.trim();
+  }
+  const chunks = asArray(messageContent);
+  const parts: string[] = [];
+  for (const chunk of chunks) {
+    const obj = asObject(chunk);
+    if (!obj) continue;
+    const text = asString(obj.text);
+    if (text) {
+      parts.push(text);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+function extractOpenAIResponseText(payload: unknown): string {
+  const body = asObject(payload);
+  const choices = asArray(body?.choices);
+  const firstChoice = asObject(choices[0]);
+  const message = asObject(firstChoice?.message);
+  const messageContent = extractOpenAIMessageContentText(message?.content);
+  if (messageContent) {
+    return messageContent;
+  }
+  const outputText = asString(body?.output_text);
+  if (outputText) {
+    return outputText.trim();
+  }
+  return "";
 }
 
 /**
@@ -435,6 +524,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: 
 interface GatewayRuntimeConfig {
   port: number;
   wsUrl: string;
+  openAIChatCompletionsUrl: string;
   hooksWakeUrl: string;
   gatewayToken: string;
   gatewayPassword: string;
@@ -992,6 +1082,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
   private readonly api: OpenClawPluginApi;
   private readonly defaultAgentId: string;
   private readonly agentResponseTimeoutMs: number;
+  private readonly openAIRequestTimeoutMs: number;
+  private readonly modelOverrideAllowlist: string[];
+  private readonly modelOverridePattern: RegExp;
   private readonly security: GatewayConfig["security"];
   private readonly taskContextByTaskId: Map<string, string>;
 
@@ -1005,6 +1098,20 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       typeof configured === "number" && Number.isFinite(configured) && configured >= 1000
         ? configured
         : DEFAULT_AGENT_RESPONSE_TIMEOUT_MS;
+    const openAIConfigured = config.timeouts?.openAIRequestTimeoutMs;
+    this.openAIRequestTimeoutMs =
+      typeof openAIConfigured === "number" && Number.isFinite(openAIConfigured) && openAIConfigured >= 1000
+        ? openAIConfigured
+        : DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
+    this.modelOverrideAllowlist = Array.isArray(config.routing.modelOverrideAllowlist)
+      ? config.routing.modelOverrideAllowlist.filter((entry) => typeof entry === "string" && entry.trim().length > 0)
+      : [];
+    const patternSource = asString(config.routing.modelOverridePattern) || "^[A-Za-z0-9._:-]+(?:/[A-Za-z0-9._:-]+)*$";
+    try {
+      this.modelOverridePattern = new RegExp(patternSource);
+    } catch {
+      this.modelOverridePattern = new RegExp("^[A-Za-z0-9._:-]+(?:/[A-Za-z0-9._:-]+)*$");
+    }
 
     this.taskContextByTaskId = new Map();
   }
@@ -1087,7 +1194,22 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     }, STREAMING_HEARTBEAT_INTERVAL_MS);
 
     try {
-      agentResponse = await this.dispatchViaGatewayRpc(agentId, requestContext.userMessage, contextId);
+      const modelOverride = extractModelOverride(requestContext.userMessage);
+      if (modelOverride) {
+        const validatedModelRef = validateModelOverride(
+          modelOverride,
+          this.modelOverrideAllowlist,
+          this.modelOverridePattern,
+        );
+        agentResponse = await this.dispatchViaOpenAIHTTP(
+          agentId,
+          requestContext.userMessage,
+          contextId,
+          validatedModelRef,
+        );
+      } else {
+        agentResponse = await this.dispatchViaGatewayRpc(agentId, requestContext.userMessage, contextId);
+      }
     } catch (err: unknown) {
       clearInterval(heartbeat);
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1199,6 +1321,68 @@ export class OpenClawAgentExecutor implements AgentExecutor {
   }
 
 
+  private async dispatchViaOpenAIHTTP(
+    agentId: string,
+    userMessage: unknown,
+    contextId: string,
+    modelOverride: string,
+  ): Promise<AgentResponse> {
+    const messageText = extractInboundMessageText(userMessage);
+    const gatewayConfig = this.resolveGatewayRuntimeConfig();
+    const sessionKey = `agent:${agentId}:a2a:${contextId}`;
+    const openclawModelId = agentId === this.defaultAgentId
+      ? OPENCLAW_DEFAULT_MODEL_ID
+      : `${OPENCLAW_MODEL_ID_PREFIX}${agentId}`;
+    const targetModel = openclawModelId;
+    const modelOverrideWithPrefix = withModelIdPrefix(modelOverride);
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json",
+      "x-openclaw-model": modelOverrideWithPrefix,
+      "x-openclaw-agent-id": agentId,
+      "x-openclaw-session-key": sessionKey,
+    };
+    if (gatewayConfig.gatewayToken) {
+      headers.authorization = `Bearer ${gatewayConfig.gatewayToken}`;
+    } else if (gatewayConfig.gatewayPassword) {
+      headers.authorization = `Bearer ${gatewayConfig.gatewayPassword}`;
+    }
+
+    const payload = {
+      model: targetModel,
+      user: sessionKey,
+      stream: false,
+      messages: [{ role: "user", content: messageText }],
+    };
+
+    const response = await fetch(gatewayConfig.openAIChatCompletionsUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(this.openAIRequestTimeoutMs),
+    });
+
+    const textBody = await response.text();
+    if (!response.ok) {
+      const bodyPreview = textBody.length > 500 ? `${textBody.slice(0, 500)}...` : textBody;
+      throw new Error(`OpenAI HTTP dispatch failed (${response.status}): ${bodyPreview}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = textBody ? JSON.parse(textBody) : {};
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`OpenAI HTTP dispatch invalid JSON response: ${message}`);
+    }
+    const responseText = extractOpenAIResponseText(parsed);
+    if (!responseText) {
+      throw new Error("OpenAI HTTP dispatch returned empty assistant response");
+    }
+    return { text: responseText, mediaUrls: [] };
+  }
+
   private async dispatchViaGatewayRpc(
     agentId: string,
     userMessage: unknown,
@@ -1273,10 +1457,12 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const port = asFiniteNumber(gateway.port) || 18_789;
     const tlsEnabled = gatewayTls.enabled === true;
     const scheme = tlsEnabled ? "wss" : "ws";
+    const httpScheme = tlsEnabled ? "https" : "http";
 
     return {
       port,
       wsUrl: `${scheme}://localhost:${port}`,
+      openAIChatCompletionsUrl: `${httpScheme}://localhost:${port}/v1/chat/completions`,
       hooksWakeUrl: `http://localhost:${port}/hooks/wake`,
       gatewayToken: asString(gatewayAuth.token) || "",
       gatewayPassword: asString(gatewayAuth.password) || "",
