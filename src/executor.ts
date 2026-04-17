@@ -22,6 +22,9 @@ const GATEWAY_CONNECT_TIMEOUT_MS = 10_000;
 const GATEWAY_REQUEST_TIMEOUT_MS = 10_000;
 const HOOKS_WAKE_TIMEOUT_MS = 5_000;
 const TASK_CONTEXT_CACHE_LIMIT = 10_000;
+const MODEL_ID_PREFIX = "cloudru/";
+const OPENCLAW_MODEL_ID_PREFIX = "openclaw/";
+const OPENCLAW_DEFAULT_MODEL_ID = `${OPENCLAW_MODEL_ID_PREFIX}default`;
 
 /**
  * Interval for SSE heartbeat events during agent dispatch.
@@ -126,6 +129,17 @@ function validateModelOverride(
     throw new Error(`model override is not allowed: ${normalized}`);
   }
   return normalized;
+}
+
+function withModelIdPrefix(modelRef: string): string {
+  const trimmed = modelRef.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (trimmed.startsWith(MODEL_ID_PREFIX)) {
+    return trimmed;
+  }
+  return `${MODEL_ID_PREFIX}${trimmed}`;
 }
 
 function extractOpenAIMessageContentText(messageContent: unknown): string {
@@ -1316,12 +1330,16 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const messageText = extractInboundMessageText(userMessage);
     const gatewayConfig = this.resolveGatewayRuntimeConfig();
     const sessionKey = `agent:${agentId}:a2a:${contextId}`;
-    const targetModel = agentId === this.defaultAgentId ? "openclaw/default" : `openclaw/${agentId}`;
+    const openclawModelId = agentId === this.defaultAgentId
+      ? OPENCLAW_DEFAULT_MODEL_ID
+      : `${OPENCLAW_MODEL_ID_PREFIX}${agentId}`;
+    const targetModel = withModelIdPrefix(openclawModelId);
+    const modelOverrideWithPrefix = withModelIdPrefix(modelOverride);
 
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
-      "x-openclaw-model": modelOverride,
+      "x-openclaw-model": modelOverrideWithPrefix,
       "x-openclaw-agent-id": agentId,
       "x-openclaw-session-key": sessionKey,
     };
