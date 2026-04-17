@@ -241,7 +241,7 @@ describe("a2a-gateway plugin", () => {
       assert.equal(capturedUrl, "http://localhost:18789/v1/chat/completions");
       assert.equal(capturedHeaderModel, "cloudru/openai/gpt-5.4");
       assert.equal(capturedHeaderSession, "agent:writer-agent:a2a:ctx-override-1");
-      assert.equal(capturedBodyModel, "cloudru/openclaw/writer-agent");
+      assert.equal(capturedBodyModel, "openclaw/writer-agent");
 
       const finalTask = published[published.length - 1] as Record<string, unknown>;
       const status = finalTask.status as Record<string, unknown>;

@@ -1333,7 +1333,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const openclawModelId = agentId === this.defaultAgentId
       ? OPENCLAW_DEFAULT_MODEL_ID
       : `${OPENCLAW_MODEL_ID_PREFIX}${agentId}`;
-    const targetModel = withModelIdPrefix(openclawModelId);
+    const targetModel = openclawModelId;
     const modelOverrideWithPrefix = withModelIdPrefix(modelOverride);
 
     const headers: Record<string, string> = {
