@@ -480,6 +480,17 @@ const plugin = {
     const requestHandler = new DefaultRequestHandler(agentCard, taskStore, executor);
 
     const app = express();
+
+    // @a2a-js/sdk's jsonRpcHandler/restHandler parse the request body with
+    // express.json() at its default ~100KB limit, which rejects inline base64
+    // file parts far below the configured maxInlineFileSizeBytes (e.g. a ~400KB
+    // PDF → ~533KB base64). Pre-parse with a limit derived from that config so
+    // the SDK's own express.json() becomes a no-op (body-parser skips when
+    // req._body is already set). base64 inflates ~4/3; add 1MB envelope headroom.
+    const a2aJsonBodyLimit = Math.ceil(config.security.maxInlineFileSizeBytes * 1.4) + 1_048_576;
+    const a2aJsonParser = express.json({ limit: a2aJsonBodyLimit });
+    app.use(a2aJsonParser);
+
     const createHttpMetricsMiddleware =
       (route: "jsonrpc" | "rest" | "metrics") =>
       (_req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -511,6 +522,21 @@ const plugin = {
     app.use("/a2a/jsonrpc", (err: unknown, _req: unknown, res: any, next: (e?: unknown) => void) => {
       if (err instanceof SyntaxError) {
         res.status(400).json(jsonRpcError(null, -32700, "Parse error"));
+        return;
+      }
+
+      // Payload too large (body-parser limit): give an actionable message
+      // instead of a generic internal error so the size cause is visible.
+      if ((err as { type?: string } | undefined)?.type === "entity.too.large") {
+        res
+          .status(413)
+          .json(
+            jsonRpcError(
+              null,
+              -32600,
+              "Request payload too large; increase security.maxInlineFileSizeBytes or send the file by URI instead of inline bytes"
+            )
+          );
         return;
       }
 
