@@ -12,6 +12,7 @@ import {
   agentMessage,
   buildTask,
   emptyPart,
+  publishStatusUpdate,
   publishTask,
   publishTextArtifactChunk,
   textPart,
@@ -1166,40 +1167,45 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       ? rawHistory.slice(-MAX_HISTORY_MESSAGES)
       : rawHistory;
 
-    // Publish initial "working" state so the task is trackable during async dispatch
-    publishTask(
-      eventBus,
-      buildTask(taskId, contextId, TaskState.TASK_STATE_WORKING, { history: existingHistory }),
-    );
-
-    // Validate inbound FileParts before dispatching to the agent
+    // Validate inbound FileParts before publishing lifecycle events
     const fileValidationError = this.validateInboundFileParts(requestContext.userMessage);
     if (fileValidationError) {
       this.api.logger.warn(`a2a-gateway: inbound file validation failed: ${fileValidationError}`);
       const rejectedMessage = agentMessage(contextId, [
         textPart(`File validation failed: ${fileValidationError}`),
       ], taskId);
-      publishTask(
-        eventBus,
-        buildTask(taskId, contextId, TaskState.TASK_STATE_FAILED, {
+      if (this.isQueuedTask(requestContext)) {
+        publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_FAILED, {
           statusMessage: rejectedMessage,
-          history: existingHistory,
-        }),
-      );
+        });
+      } else {
+        publishTask(
+          eventBus,
+          buildTask(taskId, contextId, TaskState.TASK_STATE_FAILED, {
+            statusMessage: rejectedMessage,
+            history: existingHistory,
+          }),
+        );
+      }
       eventBus.finished();
       return;
+    }
+
+    if (this.isQueuedTask(requestContext)) {
+      publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
+    } else {
+      publishTask(
+        eventBus,
+        buildTask(taskId, contextId, TaskState.TASK_STATE_WORKING, { history: existingHistory }),
+      );
     }
 
     let agentResponse: AgentResponse;
     let streamedViaOpenAI = false;
 
     // Emit periodic heartbeat events while the agent is working.
-    // This keeps SSE connections alive and signals that the task is still in progress.
     const heartbeat = setInterval(() => {
-      publishTask(
-        eventBus,
-        buildTask(taskId, contextId, TaskState.TASK_STATE_WORKING, { history: existingHistory }),
-      );
+      publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
     }, STREAMING_HEARTBEAT_INTERVAL_MS);
 
     try {
@@ -1233,13 +1239,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         textPart(`Agent dispatch failed: ${errorMessage}`),
       ], taskId);
 
-      publishTask(
-        eventBus,
-        buildTask(taskId, contextId, TaskState.TASK_STATE_FAILED, {
-          statusMessage: failedMessage,
-          history: existingHistory,
-        }),
-      );
+      publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_FAILED, {
+        statusMessage: failedMessage,
+      });
       eventBus.finished();
       return;
     }
@@ -1247,31 +1249,21 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     clearInterval(heartbeat);
 
     if (!streamedViaOpenAI && agentResponse.text) {
-      publishTextArtifactChunk(eventBus, taskId, contextId, agentResponse.text, false);
+      publishTextArtifactChunk(eventBus, taskId, contextId, agentResponse.text, false, true);
     }
 
-    // Publish completed Task with artifact (text + optional file parts)
     const responseParts = buildResponseParts(agentResponse);
     const responseMessage = agentMessage(contextId, responseParts, taskId);
 
-    publishTask(
-      eventBus,
-      buildTask(taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
-        statusMessage: responseMessage,
-        history: existingHistory,
-        artifacts: [
-          {
-            artifactId: uuidv4(),
-            name: "agent-response",
-            description: "",
-            parts: responseParts,
-            metadata: undefined,
-            extensions: [],
-          },
-        ],
-      }),
-    );
+    publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
+      statusMessage: responseMessage,
+    });
     eventBus.finished();
+  }
+
+  /** Queueing executor publishes SUBMITTED before delegate runs — lifecycle is already open. */
+  private isQueuedTask(requestContext: RequestContext): boolean {
+    return requestContext.task?.status?.state === TaskState.TASK_STATE_SUBMITTED;
   }
 
   // cancelTask intentionally omits history: it only receives taskId (no
@@ -1288,9 +1280,11 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       return;
     }
 
-    publishTask(
+    publishStatusUpdate(
       eventBus,
-      buildTask(taskId, contextId, TaskState.TASK_STATE_CANCELED),
+      taskId,
+      contextId,
+      TaskState.TASK_STATE_CANCELED,
     );
     this.taskContextByTaskId.delete(taskId);
     eventBus.finished();

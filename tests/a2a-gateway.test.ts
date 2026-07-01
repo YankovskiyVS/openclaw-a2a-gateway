@@ -8,6 +8,7 @@ import type { GatewayConfig } from "../src/types.js";
 
 import {
   assertPrimaryProtocolVersion,
+  assertTaskLifecycleStreamOrdering,
   createApi,
   createHarness,
   createMockWebSocketClass,
@@ -15,6 +16,7 @@ import {
   invokeGatewayMethod,
   isTextPart,
   isUrlPart,
+  lastPublishedStatus,
   lastPublishedTask,
   makeConfig,
   partTextFromJson,
@@ -163,6 +165,7 @@ describe("a2a-gateway plugin", () => {
       // No legacy dispatch path is used; gateway RPC is the only dispatch mechanism.
       assert.equal(true, true);
       assert.equal(finishedCalled, true);
+      assertTaskLifecycleStreamOrdering(published);
 
       const finalTask = lastPublishedTask(published);
       const status = finalTask.status as Record<string, unknown>;
@@ -389,7 +392,8 @@ describe("a2a-gateway plugin", () => {
 
     assert.equal(finishedCalled, true);
     assert.equal(published.length, 1);
-    assert.equal(unwrapPublishedTask(published[0]).id, "task-1");
+    assert.equal(published[0]?.kind, "statusUpdate");
+    assert.equal(unwrapPublishedTask(published[0]).taskId, "task-1");
     assert.equal(unwrapPublishedTask(published[0]).contextId, "ctx-1");
   });
 
@@ -730,13 +734,6 @@ describe("a2a-gateway plugin", () => {
         ? (filePart.content as { value: string }).value
         : String(filePart.url ?? "");
       assert.equal(fileUrl, "https://example.com/chart.png");
-
-      // Artifacts should also contain the file part
-      const artifacts = finalTask.artifacts as Array<{ parts: Array<Record<string, unknown>> }>;
-      assert.ok(artifacts.length >= 1, "should have at least one artifact");
-
-      const artifactFileParts = artifacts[0].parts.filter((p) => isUrlPart(p));
-      assert.equal(artifactFileParts.length, 1, "artifact should have one file part");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }

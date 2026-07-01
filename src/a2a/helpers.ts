@@ -95,6 +95,44 @@ export function publishTask(eventBus: ExecutionEventBus, task: Task): void {
   eventBus.publish(AgentEvent.task(task));
 }
 
+/** Status transitions after the initial Task event (A2A v1 §3.1.2 task-lifecycle stream). */
+export function publishStatusUpdate(
+  eventBus: ExecutionEventBus,
+  taskId: string,
+  contextId: string,
+  state: TaskState,
+  options?: { statusMessage?: Message },
+): void {
+  eventBus.publish(
+    AgentEvent.statusUpdate({
+      taskId,
+      contextId,
+      status: taskStatus(state, options?.statusMessage),
+      metadata: undefined,
+    }),
+  );
+}
+
+export function publishArtifact(
+  eventBus: ExecutionEventBus,
+  taskId: string,
+  contextId: string,
+  artifact: Artifact,
+  append: boolean,
+  lastChunk = false,
+): void {
+  eventBus.publish(
+    AgentEvent.artifactUpdate({
+      taskId,
+      contextId,
+      append,
+      lastChunk,
+      artifact,
+      metadata: undefined,
+    }),
+  );
+}
+
 export function publishTextArtifactChunk(
   eventBus: ExecutionEventBus,
   taskId: string,
@@ -107,15 +145,13 @@ export function publishTextArtifactChunk(
     return;
   }
 
-  eventBus.publish(
-    AgentEvent.artifactUpdate({
-      taskId,
-      contextId,
-      append,
-      lastChunk,
-      artifact: textArtifact(STREAM_RESPONSE_ARTIFACT_ID, delta, "agent-response"),
-      metadata: undefined,
-    }),
+  publishArtifact(
+    eventBus,
+    taskId,
+    contextId,
+    textArtifact(STREAM_RESPONSE_ARTIFACT_ID, delta, "agent-response"),
+    append,
+    lastChunk,
   );
 }
 

@@ -14,10 +14,11 @@ import {
   createApi,
   createEventBus,
   createMockWebSocketClass,
-  lastPublishedTask,
+  eventTaskState,
   makeConfig,
   partTextFromJson,
   TaskState,
+  unwrapPublishedTask,
 } from "./helpers.js";
 
 async function executeRound(executor: OpenClawAgentExecutor, taskId: string, contextId: string): Promise<void> {
@@ -38,7 +39,7 @@ async function executeRound(executor: OpenClawAgentExecutor, taskId: string, con
   );
 
   assert.equal(eventBus.isFinished(), true);
-  assert.equal((eventBus.events.at(-1) as Task).status.state, "completed");
+  assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
 }
 
 describe("multi-round conversation routing", () => {
@@ -170,18 +171,13 @@ describe("history preservation across rounds", () => {
 
       assert.equal(eventBus.isFinished(), true);
 
-      // The completed task must carry the previous history
-      const completedTask = eventBus.events.at(-1) as Task;
-      assert.equal(completedTask.status.state, "completed");
-      assert.ok(completedTask.history, "completed task should have history");
-      assert.equal(completedTask.history!.length, 2, "should carry 2 previous messages");
-      assert.equal((completedTask.history![0] as any).messageId, "msg-round-1-user");
-      assert.equal((completedTask.history![1] as any).messageId, "msg-round-1-agent");
+      assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
 
-      // The working event should also carry history
-      const workingTask = eventBus.events[0] as Task;
+      const workingTask = unwrapPublishedTask(eventBus.events[0]);
       assert.ok(workingTask.history, "working task should have history");
-      assert.equal(workingTask.history!.length, 2);
+      assert.equal((workingTask.history as unknown[]).length, 2);
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[0]?.messageId, "msg-round-1-user");
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[1]?.messageId, "msg-round-1-agent");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -224,13 +220,12 @@ describe("history preservation across rounds", () => {
         eventBus.bus,
       );
 
-      const completedTask = eventBus.events.at(-1) as Task;
-      assert.equal(completedTask.status.state, "completed");
-      assert.ok(completedTask.history, "should have history");
-      assert.equal(completedTask.history!.length, 200, "should cap at 200 messages");
-      // Should keep the LATEST 200 (indices 50-249)
-      assert.equal((completedTask.history![0] as any).messageId, "msg-50");
-      assert.equal((completedTask.history![199] as any).messageId, "msg-249");
+      const workingTask = unwrapPublishedTask(eventBus.events[0]);
+      assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
+      assert.ok(workingTask.history, "should have history");
+      assert.equal((workingTask.history as unknown[]).length, 200, "should cap at 200 messages");
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[0]?.messageId, "msg-50");
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[199]?.messageId, "msg-249");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -258,10 +253,10 @@ describe("history preservation across rounds", () => {
         eventBus.bus,
       );
 
-      const completedTask = eventBus.events.at(-1) as Task;
-      assert.equal(completedTask.status.state, "completed");
-      assert.ok(Array.isArray(completedTask.history), "history should be an array");
-      assert.equal(completedTask.history!.length, 0, "first round should have empty history");
+      assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
+      const workingTask = unwrapPublishedTask(eventBus.events[0]);
+      assert.ok(Array.isArray(workingTask.history), "history should be an array");
+      assert.equal((workingTask.history as unknown[]).length, 0, "first round should have empty history");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }

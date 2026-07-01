@@ -12,6 +12,7 @@ import {
   agentMessage,
   buildTask,
   partText,
+  publishStatusUpdate,
   terminalStateLabel,
   textPart,
 } from "./a2a/helpers.js";
@@ -156,13 +157,20 @@ export class QueueingAgentExecutor implements AgentExecutor {
         this.queue.length,
         this.queue.length,
       );
+      requestContext.task = buildTask(
+        requestContext.taskId,
+        requestContext.contextId,
+        TaskState.TASK_STATE_SUBMITTED,
+        {
+          statusMessage: statusMessage(
+            requestContext.contextId,
+            `Queued for execution (position ${this.queue.length})`,
+            requestContext.taskId,
+          ),
+        },
+      );
       eventBus.publish(
-        taskEvent(
-          requestContext.taskId,
-          requestContext.contextId,
-          TaskState.TASK_STATE_SUBMITTED,
-          `Queued for execution (position ${this.queue.length})`,
-        ),
+        AgentEvent.task(requestContext.task),
       );
     });
   }
@@ -173,8 +181,18 @@ export class QueueingAgentExecutor implements AgentExecutor {
       const [entry] = this.queue.splice(queuedIndex, 1);
       if (entry) {
         this.pendingByTaskId.delete(taskId);
-        entry.eventBus.publish(
-          taskEvent(taskId, entry.requestContext.contextId, TaskState.TASK_STATE_CANCELED, "Task canceled while queued"),
+        publishStatusUpdate(
+          entry.eventBus,
+          taskId,
+          entry.requestContext.contextId,
+          TaskState.TASK_STATE_CANCELED,
+          {
+            statusMessage: statusMessage(
+              entry.requestContext.contextId,
+              "Task canceled while queued",
+              taskId,
+            ),
+          },
         );
         entry.eventBus.finished();
         entry.resolve();
