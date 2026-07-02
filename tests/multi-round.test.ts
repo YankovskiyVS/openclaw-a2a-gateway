@@ -14,7 +14,11 @@ import {
   createApi,
   createEventBus,
   createMockWebSocketClass,
+  eventTaskState,
   makeConfig,
+  partTextFromJson,
+  TaskState,
+  unwrapPublishedTask,
 } from "./helpers.js";
 
 async function executeRound(executor: OpenClawAgentExecutor, taskId: string, contextId: string): Promise<void> {
@@ -25,18 +29,17 @@ async function executeRound(executor: OpenClawAgentExecutor, taskId: string, con
       taskId,
       contextId,
       userMessage: {
-        kind: "message",
-        messageId: `msg-${taskId}`,
-        role: "user",
+                messageId: `msg-${taskId}`,
+        role: "ROLE_USER",
         agentId: "writer-agent",
-        parts: [{ kind: "text", text: `hello-${taskId}` }],
+        parts: [{ text: `hello-${taskId}` }],
       },
     } as any,
     eventBus.bus,
   );
 
   assert.equal(eventBus.isFinished(), true);
-  assert.equal((eventBus.events.at(-1) as Task).status.state, "completed");
+  assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
 }
 
 describe("multi-round conversation routing", () => {
@@ -134,16 +137,16 @@ describe("history preservation across rounds", () => {
         {
           kind: "message" as const,
           messageId: "msg-round-1-user",
-          role: "user" as const,
+          role: "ROLE_USER" as const,
           contextId: "ctx-hist",
-          parts: [{ kind: "text" as const, text: "round-1 question" }],
+          parts: [{ text: "round-1 question" }],
         },
         {
           kind: "message" as const,
           messageId: "msg-round-1-agent",
-          role: "agent" as const,
+          role: "ROLE_AGENT" as const,
           contextId: "ctx-hist",
-          parts: [{ kind: "text" as const, text: "round-1 answer" }],
+          parts: [{ text: "round-1 answer" }],
         },
       ];
 
@@ -152,17 +155,15 @@ describe("history preservation across rounds", () => {
           taskId: "task-hist-2",
           contextId: "ctx-hist",
           task: {
-            kind: "task",
-            id: "task-hist-2",
+                        id: "task-hist-2",
             contextId: "ctx-hist",
-            status: { state: "working", timestamp: new Date().toISOString() },
+            status: { state: TaskState.TASK_STATE_WORKING, timestamp: new Date().toISOString() },
             history: previousHistory,
           },
           userMessage: {
-            kind: "message",
-            messageId: "msg-round-2-user",
-            role: "user",
-            parts: [{ kind: "text", text: "round-2 question" }],
+                        messageId: "msg-round-2-user",
+            role: "ROLE_USER",
+            parts: [{ text: "round-2 question" }],
           },
         } as any,
         eventBus.bus,
@@ -170,18 +171,13 @@ describe("history preservation across rounds", () => {
 
       assert.equal(eventBus.isFinished(), true);
 
-      // The completed task must carry the previous history
-      const completedTask = eventBus.events.at(-1) as Task;
-      assert.equal(completedTask.status.state, "completed");
-      assert.ok(completedTask.history, "completed task should have history");
-      assert.equal(completedTask.history!.length, 2, "should carry 2 previous messages");
-      assert.equal((completedTask.history![0] as any).messageId, "msg-round-1-user");
-      assert.equal((completedTask.history![1] as any).messageId, "msg-round-1-agent");
+      assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
 
-      // The working event should also carry history
-      const workingTask = eventBus.events[0] as Task;
+      const workingTask = unwrapPublishedTask(eventBus.events[0]);
       assert.ok(workingTask.history, "working task should have history");
-      assert.equal(workingTask.history!.length, 2);
+      assert.equal((workingTask.history as unknown[]).length, 2);
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[0]?.messageId, "msg-round-1-user");
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[1]?.messageId, "msg-round-1-agent");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -202,7 +198,7 @@ describe("history preservation across rounds", () => {
         messageId: `msg-${i}`,
         role: (i % 2 === 0 ? "user" : "agent") as "user" | "agent",
         contextId: "ctx-big",
-        parts: [{ kind: "text" as const, text: `message ${i}` }],
+        parts: [{ text: `message ${i}` }],
       }));
 
       await executor.execute(
@@ -210,29 +206,26 @@ describe("history preservation across rounds", () => {
           taskId: "task-big",
           contextId: "ctx-big",
           task: {
-            kind: "task",
-            id: "task-big",
+                        id: "task-big",
             contextId: "ctx-big",
-            status: { state: "working", timestamp: new Date().toISOString() },
+            status: { state: TaskState.TASK_STATE_WORKING, timestamp: new Date().toISOString() },
             history: bigHistory,
           },
           userMessage: {
-            kind: "message",
-            messageId: "msg-big-next",
-            role: "user",
-            parts: [{ kind: "text", text: "next" }],
+                        messageId: "msg-big-next",
+            role: "ROLE_USER",
+            parts: [{ text: "next" }],
           },
         } as any,
         eventBus.bus,
       );
 
-      const completedTask = eventBus.events.at(-1) as Task;
-      assert.equal(completedTask.status.state, "completed");
-      assert.ok(completedTask.history, "should have history");
-      assert.equal(completedTask.history!.length, 200, "should cap at 200 messages");
-      // Should keep the LATEST 200 (indices 50-249)
-      assert.equal((completedTask.history![0] as any).messageId, "msg-50");
-      assert.equal((completedTask.history![199] as any).messageId, "msg-249");
+      const workingTask = unwrapPublishedTask(eventBus.events[0]);
+      assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
+      assert.ok(workingTask.history, "should have history");
+      assert.equal((workingTask.history as unknown[]).length, 200, "should cap at 200 messages");
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[0]?.messageId, "msg-50");
+      assert.equal((workingTask.history as Array<{ messageId?: string }>)[199]?.messageId, "msg-249");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -252,19 +245,18 @@ describe("history preservation across rounds", () => {
           taskId: "task-first",
           contextId: "ctx-first",
           userMessage: {
-            kind: "message",
-            messageId: "msg-first",
-            role: "user",
-            parts: [{ kind: "text", text: "hello" }],
+                        messageId: "msg-first",
+            role: "ROLE_USER",
+            parts: [{ text: "hello" }],
           },
         } as any,
         eventBus.bus,
       );
 
-      const completedTask = eventBus.events.at(-1) as Task;
-      assert.equal(completedTask.status.state, "completed");
-      assert.ok(Array.isArray(completedTask.history), "history should be an array");
-      assert.equal(completedTask.history!.length, 0, "first round should have empty history");
+      assert.equal(eventTaskState(eventBus.events.at(-1)), TaskState.TASK_STATE_COMPLETED);
+      const workingTask = unwrapPublishedTask(eventBus.events[0]);
+      assert.ok(Array.isArray(workingTask.history), "history should be an array");
+      assert.equal((workingTask.history as unknown[]).length, 0, "first round should have empty history");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -279,28 +271,25 @@ describe("FileTaskStore multi-round persistence", () => {
       const store = new FileTaskStore(tasksDir);
 
       await store.save({
-        kind: "task",
-        id: "task-1",
+                id: "task-1",
         contextId: "ctx-round",
         status: {
-          state: "working",
+          state: TaskState.TASK_STATE_WORKING,
           timestamp: new Date().toISOString(),
         },
       } as Task);
 
       await store.save({
-        kind: "task",
-        id: "task-1",
+                id: "task-1",
         contextId: "ctx-round",
         status: {
-          state: "completed",
+          state: TaskState.TASK_STATE_COMPLETED,
           timestamp: new Date().toISOString(),
           message: {
-            kind: "message",
-            messageId: "msg-task-1-completed",
-            role: "agent",
+                        messageId: "msg-task-1-completed",
+            role: "ROLE_AGENT",
             contextId: "ctx-round",
-            parts: [{ kind: "text", text: "latest-completed-message" }],
+            parts: [{ text: "latest-completed-message" }],
           },
         },
       } as Task);

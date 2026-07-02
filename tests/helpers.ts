@@ -5,8 +5,11 @@
  */
 import assert from "node:assert/strict";
 
+import { TaskState } from "@a2a-js/sdk";
+
 import plugin from "../index.js";
 import type { GatewayConfig } from "../src/types.js";
+import { primaryAgentUrl, primaryProtocolVersion } from "../src/agent-card.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,10 +42,6 @@ export function silentLogger() {
     error: () => {},
   } as any;
 }
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
 
 export function makeConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -138,7 +137,7 @@ export function createMockWebSocketClass(options?: {
       if (frame.method === "agent") {
         options?.onAgent?.(frame.params || {});
         this.respond(frame.id, true, { status: "accepted" });
-        const payloads = agentResponsePayloads ?? [{ kind: "text", text: agentResponseText }];
+        const payloads = agentResponsePayloads ?? [{ text: agentResponseText }];
         this.respond(frame.id, true, {
           status: "ok",
           result: { payloads },
@@ -281,3 +280,131 @@ export async function invokeGatewayMethod(
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// A2A v1 test helpers
+// ---------------------------------------------------------------------------
+
+export function v1TextPart(text: string) {
+  return { text };
+}
+
+export function v1UserMessage(text: string, extras: Record<string, unknown> = {}) {
+  return {
+    messageId: "msg-1",
+    role: "ROLE_USER",
+    parts: [v1TextPart(text)],
+    ...extras,
+  };
+}
+
+export function unwrapPublishedTask(event: unknown): Record<string, unknown> {
+  const obj = event as { kind?: string; data?: Record<string, unknown> };
+  if ((obj.kind === "task" || obj.kind === "statusUpdate") && obj.data) {
+    return obj.data;
+  }
+  return obj as Record<string, unknown>;
+}
+
+export function lastPublishedTask(published: unknown[]): Record<string, unknown> {
+  for (let i = published.length - 1; i >= 0; i -= 1) {
+    const obj = published[i] as { kind?: string; data?: Record<string, unknown> };
+    if (obj.kind === "statusUpdate" && obj.data) {
+      return obj.data;
+    }
+    if (obj.kind === "task" && obj.data) {
+      return obj.data;
+    }
+  }
+  return unwrapPublishedTask(published[published.length - 1]);
+}
+
+export function lastPublishedStatus(published: unknown[]): Record<string, unknown> {
+  const task = lastPublishedTask(published);
+  return (task.status as Record<string, unknown> | undefined) ?? task;
+}
+
+/** Validates A2A v1 §3.1.2 task-lifecycle stream ordering for message/stream. */
+export function assertTaskLifecycleStreamOrdering(events: unknown[]): void {
+  let pattern: "undetermined" | "message-only" | "task-lifecycle" = "undetermined";
+
+  for (const raw of events) {
+    const event = raw as { kind?: string };
+    switch (pattern) {
+      case "undetermined":
+        if (event.kind === "message") {
+          pattern = "message-only";
+        } else if (event.kind === "task") {
+          pattern = "task-lifecycle";
+        } else {
+          throw new Error(`received ${event.kind ?? "unknown"} before initial task/message`);
+        }
+        break;
+      case "message-only":
+        throw new Error(`received ${event.kind ?? "unknown"} after message-only response`);
+      case "task-lifecycle":
+        if (event.kind !== "statusUpdate" && event.kind !== "artifactUpdate") {
+          throw new Error(`stream ordering violation: received ${event.kind ?? "unknown"} in task lifecycle stream`);
+        }
+        break;
+    }
+  }
+}
+
+export function eventTaskState(event: unknown): TaskState | string | undefined {
+  const obj = event as { kind?: string; data?: Record<string, unknown> };
+  if (obj.kind === "statusUpdate") {
+    return (obj.data?.status as { state?: TaskState } | undefined)?.state;
+  }
+  if (obj.kind === "task") {
+    return (obj.data?.status as { state?: TaskState } | undefined)?.state;
+  }
+  return (event as { status?: { state?: TaskState } }).status?.state;
+}
+
+export function executionTaskState(event: unknown): TaskState | string | undefined {
+  return eventTaskState(event);
+}
+
+export function partTextFromJson(part: Record<string, unknown>): string {
+  const content = part.content as { $case?: string; value?: string } | undefined;
+  if (content?.$case === "text" && typeof content.value === "string") {
+    return content.value;
+  }
+  if (typeof part.text === "string") {
+    return part.text;
+  }
+  return "";
+}
+
+export function assertPrimaryProtocolVersion(card: Record<string, unknown>, expected = "1.0") {
+  assert.equal(primaryProtocolVersion(card as any), expected);
+}
+
+export function assertPrimaryAgentUrl(card: Record<string, unknown>) {
+  assert.ok(primaryAgentUrl(card as any), "should have a primary agent URL");
+}
+
+export function isUrlPart(part: Record<string, unknown>): boolean {
+  const content = part.content as { $case?: string } | undefined;
+  return content?.$case === "url" || typeof part.url === "string";
+}
+
+export function isTextPart(part: Record<string, unknown>): boolean {
+  const content = part.content as { $case?: string } | undefined;
+  return content?.$case === "text" || typeof part.text === "string";
+}
+
+export function partUrlFromJson(part: Record<string, unknown>): string {
+  const content = part.content as { $case?: string; value?: string } | undefined;
+  if (content?.$case === "url" && typeof content.value === "string") {
+    return content.value;
+  }
+  if (typeof part.url === "string") {
+    return part.url;
+  }
+  const legacyFile = part.file as { uri?: string } | undefined;
+  return legacyFile?.uri ?? "";
+}
+
+export { TaskState, primaryAgentUrl, primaryProtocolVersion };
