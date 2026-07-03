@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.5.0] - 2026-07-04
+
+### Added
+
+- **A2A DevTools CLI** (`cli/`, `@openclaw/a2a-cli`) — unified `a2a` command with 8 subcommands for gateway development and debugging: `card`, `send`, `status`, `health`, `discover`, `stream`, `bench`, `trace`
+- **WebSocket connection pool** — reuses gateway RPC connections for dispatch, cutting scheduling latency by 50%+ (#32, #60)
+- **Reverse proxy support** — run the gateway behind nginx/Caddy with path prefixes; proxy-aware URL handling plus deployment docs (#67)
+- A2A routing recipes for TweetClaw (#76) and GetXAPI (#78)
+
+### Changed
+
+- npm package is now the recommended quick-start install (`npm i openclaw-a2a-gateway`); `data/` and docs are excluded from the tarball
+
+### Fixed
+
+- **OpenClaw 2026.5.x compatibility** — restored gateway method registration and startup activation against the new plugin runtime
+- **OpenClaw gateway protocol v4 support** (#74)
+- Blocking A2A agent event responses no longer stall the event loop (#77)
+- Detect silent scope downgrade on cross-machine A2A connect (#54)
+- `defaultAgentId` now matches the OpenClaw default (`"main"`, not `"default"`) (#57, #59)
+- Raised A2A JSON body limit to allow inline file transfers (#69)
+- Removed deprecated `grpcServer.start()` call (#80)
+
 ## [1.4.0] - 2026-04-04
 
 ### Added
