@@ -8,6 +8,7 @@ import type { Message, Part, Task } from "@a2a-js/sdk";
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 
 import type { GatewayConfig, OpenClawPluginApi } from "./types.js";
+import { enqueueDispatch } from "./dispatch-queue.js";
 import {
   validateMimeType,
   validateUriSchemeAndIp,
@@ -1255,6 +1256,8 @@ export class OpenClawAgentExecutor implements AgentExecutor {
   private readonly security: GatewayConfig["security"];
   private readonly taskContextByTaskId: Map<string, string>;
   private readonly wsPool: GatewayRpcConnectionPool;
+  /** Per-contextId dispatch queue to serialize concurrent tasks sharing a context. */
+  private readonly dispatchQueues = new Map<string, Promise<void>>();
 
   constructor(api: OpenClawPluginApi, config: GatewayConfig) {
     this.api = api;
@@ -1354,7 +1357,12 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     }, STREAMING_HEARTBEAT_INTERVAL_MS);
 
     try {
-      agentResponse = await this.dispatchViaGatewayRpc(agentId, requestContext.userMessage, contextId);
+      // Serialize dispatch per contextId to prevent race conditions on the
+      // session .jsonl file when two tasks share the same contextId.
+      // See: https://github.com/win4r/openclaw-a2a-gateway/issues/81
+      agentResponse = await enqueueDispatch(this.dispatchQueues, contextId, () =>
+        this.dispatchViaGatewayRpc(agentId, requestContext.userMessage, contextId),
+      );
     } catch (err: unknown) {
       clearInterval(heartbeat);
       const errorMessage = err instanceof Error ? err.message : String(err);
