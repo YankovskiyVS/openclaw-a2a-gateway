@@ -6,6 +6,8 @@ import type { ExecutionEventBus } from "@a2a-js/sdk/server";
 import { AgentEvent } from "@a2a-js/sdk/server";
 
 export const STREAM_RESPONSE_ARTIFACT_ID = "agent-response-text";
+export const STREAM_TOOL_ARTIFACT_ID = "agent-tool-call";
+export const TOOL_DATA_MIME = "application/vnd.cloudru.agent-space.tool+json";
 
 export const TERMINAL_TASK_STATES = new Set<TaskState>([
   TaskState.TASK_STATE_COMPLETED,
@@ -34,6 +36,15 @@ export function urlPart(url: string, mediaType = ""): Part {
 
 export function emptyPart(): Part {
   return textPart("");
+}
+
+export function dataPart(data: unknown, mediaType = TOOL_DATA_MIME): Part {
+  return {
+    content: { $case: "data", value: data },
+    metadata: undefined,
+    filename: "",
+    mediaType,
+  };
 }
 
 export function partText(part: Part | undefined): string | undefined {
@@ -150,6 +161,31 @@ export function publishTextArtifactChunk(
     taskId,
     contextId,
     textArtifact(STREAM_RESPONSE_ARTIFACT_ID, delta, "agent-response"),
+    append,
+    lastChunk,
+  );
+}
+
+export function publishToolArtifact(
+  eventBus: ExecutionEventBus,
+  taskId: string,
+  contextId: string,
+  data: Record<string, unknown>,
+  append = false,
+  lastChunk = false,
+): void {
+  publishArtifact(
+    eventBus,
+    taskId,
+    contextId,
+    {
+      artifactId: STREAM_TOOL_ARTIFACT_ID,
+      name: "agent-tool",
+      description: "",
+      parts: [dataPart(data)],
+      metadata: undefined,
+      extensions: [],
+    },
     append,
     lastChunk,
   );

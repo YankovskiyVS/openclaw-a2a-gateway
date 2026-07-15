@@ -15,6 +15,7 @@ import {
   publishStatusUpdate,
   publishTask,
   publishTextArtifactChunk,
+  publishToolArtifact,
   textPart,
   urlPart,
 } from "./a2a/helpers.js";
@@ -63,6 +64,95 @@ interface OpenAIStreamOptions {
   eventBus: ExecutionEventBus;
   taskId: string;
   contextId: string;
+}
+
+interface GatewayStreamContext {
+  eventBus: ExecutionEventBus;
+  taskId: string;
+  contextId: string;
+  runId: string;
+  textChunkIndex: number;
+  streamedText: boolean;
+}
+
+function normalizeToolPayload(value: unknown): Record<string, unknown> | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return { value };
+}
+
+function handleGatewayAgentEvent(
+  payload: Record<string, unknown>,
+  stream: GatewayStreamContext,
+): void {
+  const runId = asString(payload.runId);
+  if (runId && runId !== stream.runId) {
+    return;
+  }
+
+  const streamKind = asString(payload.stream);
+  const data = asObject(payload.data) ?? {};
+
+  if (streamKind === "assistant") {
+    const delta = asString(data.delta) ?? asString(data.text);
+    if (!delta) {
+      return;
+    }
+    publishTextArtifactChunk(
+      stream.eventBus,
+      stream.taskId,
+      stream.contextId,
+      delta,
+      stream.textChunkIndex > 0,
+    );
+    stream.textChunkIndex += 1;
+    stream.streamedText = true;
+    return;
+  }
+
+  if (streamKind !== "tool") {
+    return;
+  }
+
+  const phase = asString(data.phase);
+  const toolCallId = asString(data.toolCallId);
+  const toolName = asString(data.name);
+  if (!phase || !toolCallId || !toolName) {
+    return;
+  }
+
+  const toolData: Record<string, unknown> = {
+    kind: "tool",
+    callId: toolCallId,
+    name: toolName,
+    phase,
+  };
+
+  if (phase === "start") {
+    const input = normalizeToolPayload(data.args);
+    if (input) {
+      toolData.input = input;
+    }
+  } else if (phase === "update") {
+    const output = normalizeToolPayload(data.partialResult);
+    if (output) {
+      toolData.output = output;
+    }
+  } else if (phase === "result") {
+    const output = normalizeToolPayload(data.result);
+    if (output) {
+      toolData.output = output;
+    }
+    if (data.isError === true) {
+      toolData.isError = true;
+    }
+  }
+
+  publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, toolData);
 }
 
 function extractOpenAIStreamDelta(payload: unknown): string {
@@ -637,6 +727,7 @@ class GatewayRpcConnection {
   private readonly gatewayToken: string;
   private readonly gatewayPassword: string;
   private readonly pending: Map<string, PendingGatewayRequest>;
+  private readonly onAgentEvent?: (payload: Record<string, unknown>) => void;
   private socket: GatewayWebSocket | null;
   private messageListener: ((event: { data: unknown }) => void) | null;
   private closeListener: ((event: unknown) => void) | null;
@@ -646,10 +737,11 @@ class GatewayRpcConnection {
   private connectChallengeRejecter: ((error: Error) => void) | null;
   private challengeNonce: string;
 
-  constructor(config: GatewayRuntimeConfig) {
+  constructor(config: GatewayRuntimeConfig, options?: { onAgentEvent?: (payload: Record<string, unknown>) => void }) {
     this.wsUrl = config.wsUrl;
     this.gatewayToken = config.gatewayToken;
     this.gatewayPassword = config.gatewayPassword;
+    this.onAgentEvent = options?.onAgentEvent;
     this.pending = new Map();
     this.socket = null;
     this.messageListener = null;
@@ -970,6 +1062,7 @@ class GatewayRpcConnection {
       },
       role,
       scopes,
+      caps: ["tool-events"],
     };
 
     if (Object.keys(auth).length > 0) {
@@ -1055,6 +1148,13 @@ class GatewayRpcConnection {
         const nonce = asString(payload?.nonce)?.trim() || "";
         if (nonce && this.connectChallengeResolver) {
           this.connectChallengeResolver(nonce);
+        }
+        return;
+      }
+      if (frame.event === "agent" && this.onAgentEvent) {
+        const payload = asObject(frame.payload);
+        if (payload) {
+          this.onAgentEvent(payload);
         }
       }
       return;
@@ -1202,6 +1302,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
 
     let agentResponse: AgentResponse;
     let streamedViaOpenAI = false;
+    let streamedViaGateway = false;
 
     // Emit periodic heartbeat events while the agent is working.
     const heartbeat = setInterval(() => {
@@ -1225,7 +1326,14 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         );
         streamedViaOpenAI = true;
       } else {
-        agentResponse = await this.dispatchViaGatewayRpc(agentId, requestContext.userMessage, contextId);
+        const gatewayStreamCtx = { eventBus, taskId, contextId };
+        agentResponse = await this.dispatchViaGatewayRpc(
+          agentId,
+          requestContext.userMessage,
+          contextId,
+          gatewayStreamCtx,
+        );
+        streamedViaGateway = gatewayStreamCtx.streamedText === true;
       }
     } catch (err: unknown) {
       clearInterval(heartbeat);
@@ -1248,7 +1356,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
 
     clearInterval(heartbeat);
 
-    if (!streamedViaOpenAI && agentResponse.text) {
+    if (!streamedViaOpenAI && !streamedViaGateway && agentResponse.text) {
       publishTextArtifactChunk(eventBus, taskId, contextId, agentResponse.text, false, true);
     }
 
@@ -1434,10 +1542,26 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     agentId: string,
     userMessage: unknown,
     contextId: string,
+    streamContext?: Pick<GatewayStreamContext, "eventBus" | "taskId" | "contextId"> & { streamedText?: boolean },
   ): Promise<AgentResponse> {
     const messageText = extractInboundMessageText(userMessage);
     const gatewayConfig = this.resolveGatewayRuntimeConfig();
-    const gateway = new GatewayRpcConnection(gatewayConfig);
+    const runId = uuidv4();
+    const gatewayStream: GatewayStreamContext | undefined = streamContext
+      ? {
+          eventBus: streamContext.eventBus,
+          taskId: streamContext.taskId,
+          contextId: streamContext.contextId,
+          runId,
+          textChunkIndex: 0,
+          streamedText: false,
+        }
+      : undefined;
+    const gateway = new GatewayRpcConnection(gatewayConfig, {
+      onAgentEvent: gatewayStream
+        ? (payload) => handleGatewayAgentEvent(payload, gatewayStream)
+        : undefined,
+    });
 
     await gateway.connect();
 
@@ -1448,7 +1572,6 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       // The gateway `agent` RPC auto-creates the session if it doesn't exist.
       const sessionKey = `agent:${agentId}:a2a:${contextId}`;
 
-      const runId = uuidv4();
       const agentParams: Record<string, unknown> = {
         agentId,
         message: messageText,
@@ -1490,6 +1613,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
 
       throw new Error("No assistant response text returned by gateway");
     } finally {
+      if (gatewayStream && streamContext) {
+        streamContext.streamedText = gatewayStream.streamedText;
+      }
       gateway.close();
     }
   }
