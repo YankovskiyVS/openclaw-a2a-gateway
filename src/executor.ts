@@ -137,6 +137,16 @@ function handleGatewayAgentEvent(
     return;
   }
 
+  // while before_tool_call is blocked, the bridge already published pending_approval.
+  // Ignore OpenClaw tool-stream "start/update" so we don't overwrite with RUNNING.
+  if (
+    stream.toolApprovalEnabled &&
+    toolApprovalBridge.isAwaitingCallId(toolCallId) &&
+    (phase === "start" || phase === "update")
+  ) {
+    return;
+  }
+
   const toolData: Record<string, unknown> = {
     kind: "tool",
     callId: toolCallId,

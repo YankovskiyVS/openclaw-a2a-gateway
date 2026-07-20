@@ -96,6 +96,12 @@ export class ToolApprovalBridge {
     return this.awaitingTaskIds.has(taskId);
   }
 
+  /** True while before_tool_call is blocked for this tool call id. */
+  isAwaitingCallId(callId: string | undefined): boolean {
+    if (!callId) return false;
+    return this.pendingByCallId.has(callId);
+  }
+
   shouldRequireApproval(toolName: string, tools?: string[]): boolean {
     if (!tools || tools.length === 0) return true;
     return tools.includes(toolName);
