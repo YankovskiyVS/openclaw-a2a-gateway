@@ -1381,12 +1381,24 @@ export class OpenClawAgentExecutor implements AgentExecutor {
           );
           return;
         }
-        // Fresh ack-only task (preferred): complete quickly without touching the agent run.
-        publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
-          statusMessage: agentMessage(contextId, [
-            textPart("Tool approval recorded"),
-          ], taskId),
-        });
+        // Fresh ack-only task: ResultManager requires an initial Task event.
+        // Status-only COMPLETED yields "unknown task" + client error
+        // "Execution finished before a message or task was produced."
+        const ackMessage = agentMessage(contextId, [
+          textPart("Tool approval recorded"),
+        ], taskId);
+        if (this.isQueuedTask(requestContext)) {
+          publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
+            statusMessage: ackMessage,
+          });
+        } else {
+          publishTask(
+            eventBus,
+            buildTask(taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
+              statusMessage: ackMessage,
+            }),
+          );
+        }
         eventBus.finished();
         return;
       }
