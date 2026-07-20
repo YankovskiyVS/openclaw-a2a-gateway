@@ -30,6 +30,7 @@ import {
   type ExecApprovalRequestPayload,
   type ToolApprovalDecision,
 } from "./tool-approval.js";
+import { toolApprovalBridge } from "./tool-approval-bridge.js";
 import {
   validateMimeType,
   validateUriSchemeAndIp,
@@ -169,24 +170,8 @@ function handleGatewayAgentEvent(
 
   publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, toolData);
 
-  if (stream.toolApprovalEnabled && phase === "start") {
-    publishStatusUpdate(
-      stream.eventBus,
-      stream.taskId,
-      stream.contextId,
-      TaskState.TASK_STATE_INPUT_REQUIRED,
-      {
-        statusMessage: agentMessage(stream.contextId, [
-          dataPart({
-            kind: "toolApproval",
-            approvalId: toolCallId,
-            callId: toolCallId,
-            name: toolName,
-          }),
-        ], stream.taskId),
-      },
-    );
-  }
+  // Blocking HITL is handled by before_tool_call + toolApprovalBridge.
+  // Do not fake input-required here — that raced the still-running agent turn.
 }
 
 function handleExecApprovalRequested(
@@ -1350,14 +1335,22 @@ export class OpenClawAgentExecutor implements AgentExecutor {
 
     const approvalDecision = extractToolApprovalDecision(requestContext.userMessage);
     if (approvalDecision) {
-      try {
-        await this.resolveExecApproval(approvalDecision.decision, approvalDecision.approvalId);
-      } catch (err: unknown) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        this.api.logger.warn(`a2a-gateway: exec.approval.resolve skipped: ${errorMessage}`);
+      const settled = toolApprovalBridge.resolve(
+        approvalDecision.approvalId,
+        approvalDecision.decision,
+        approvalDecision.callId,
+      );
+      if (!settled) {
+        // Fallback: native OpenClaw exec approvals (exec.approval.resolve).
+        try {
+          await this.resolveExecApproval(approvalDecision.decision, approvalDecision.approvalId);
+        } catch (err: unknown) {
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          this.api.logger.warn(`a2a-gateway: exec.approval.resolve skipped: ${errorMessage}`);
+        }
       }
       if (isToolApprovalOnlyMessage(requestContext.userMessage)) {
-        publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
+        // Ack-only message: decision was applied to the blocked agent turn.
         eventBus.finished();
         return;
       }
@@ -1414,7 +1407,11 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     let streamedViaGateway = false;
 
     // Emit periodic heartbeat events while the agent is working.
+    // Skip while paused for tool approval so we don't overwrite input-required.
     const heartbeat = setInterval(() => {
+      if (toolApprovalBridge.isAwaitingApproval(taskId)) {
+        return;
+      }
       publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
     }, STREAMING_HEARTBEAT_INTERVAL_MS);
 
@@ -1656,6 +1653,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const messageText = extractInboundMessageText(userMessage);
     const gatewayConfig = this.resolveGatewayRuntimeConfig();
     const runId = uuidv4();
+    const sessionKey = `agent:${agentId}:a2a:${contextId}`;
     const gatewayStream: GatewayStreamContext | undefined = streamContext
       ? {
           eventBus: streamContext.eventBus,
@@ -1676,6 +1674,16 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         : undefined,
     });
 
+    if (gatewayStream) {
+      toolApprovalBridge.registerStream({
+        eventBus: gatewayStream.eventBus,
+        taskId: gatewayStream.taskId,
+        contextId: gatewayStream.contextId,
+        runId: gatewayStream.runId,
+        sessionKey,
+      });
+    }
+
     await gateway.connect();
 
     try {
@@ -1683,7 +1691,6 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       // 1. Session reuse across messages in the same A2A context (conversation continuity)
       // 2. Isolation between different A2A contexts (no cross-contamination)
       // The gateway `agent` RPC auto-creates the session if it doesn't exist.
-      const sessionKey = `agent:${agentId}:a2a:${contextId}`;
 
       const agentParams: Record<string, unknown> = {
         agentId,
@@ -1726,6 +1733,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
 
       throw new Error("No assistant response text returned by gateway");
     } finally {
+      if (gatewayStream) {
+        toolApprovalBridge.unregisterStream(gatewayStream.runId);
+      }
       if (gatewayStream && streamContext) {
         streamContext.streamedText = gatewayStream.streamedText;
       }

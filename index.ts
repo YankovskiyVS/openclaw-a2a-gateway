@@ -63,6 +63,7 @@ import {
   parseSaturationConfig,
   type SaturationConfig,
 } from "./src/saturation-model.js";
+import { toolApprovalBridge } from "./src/tool-approval-bridge.js";
 
 /** Build a JSON-RPC error response. */
 function jsonRpcError(id: string | number | null, code: number, message: string) {
@@ -295,6 +296,14 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     })(),
     toolApproval: {
       enabled: asBoolean(toolApproval.enabled, true),
+      tools: (() => {
+        if (!Array.isArray(toolApproval.tools)) return undefined;
+        const list = (toolApproval.tools as unknown[])
+          .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+          .map((t) => t.trim());
+        return list.length > 0 ? list : undefined;
+      })(),
+      timeoutMs: Math.max(5_000, asNumber(toolApproval.timeoutMs, 120_000)),
     },
     routing: {
       defaultAgentId: asString(routing.defaultAgentId, "main"),
@@ -412,6 +421,55 @@ const plugin = {
       config.routing.defaultAgentId,
     );
     const agentCard = buildAgentCard(config);
+
+    // Human-in-the-loop: pause agent turn in before_tool_call until A2A client
+    // sends metadata.toolApproval. (OpenClaw 2026.3.2 has no requireApproval —
+    // we await a Promise and return { block } on deny/timeout.)
+    if (config.toolApproval.enabled) {
+      api.on(
+        "before_tool_call",
+        async (event, ctx) => {
+          const runId = event.runId ?? ctx.runId;
+          const sessionKey = ctx.sessionKey;
+          const toolCallId = event.toolCallId ?? ctx.toolCallId;
+          const toolName = event.toolName || ctx.toolName;
+          if (!toolName) {
+            return;
+          }
+
+          const decision = await toolApprovalBridge.requestApproval({
+            toolName,
+            params: (event.params ?? {}) as Record<string, unknown>,
+            toolCallId,
+            runId,
+            sessionKey,
+            timeoutMs: config.toolApproval.timeoutMs ?? 120_000,
+            tools: config.toolApproval.tools,
+          });
+
+          if (decision === "deny" || decision === "timeout" || decision === "cancelled") {
+            api.logger.info(
+              `a2a-gateway: blocked tool ${toolName} decision=${decision} callId=${toolCallId ?? ""}`,
+            );
+            return {
+              block: true,
+              blockReason:
+                decision === "deny"
+                  ? `Tool "${toolName}" denied by user`
+                  : `Tool "${toolName}" approval ${decision}`,
+            };
+          }
+
+          api.logger.info(
+            `a2a-gateway: allowed tool ${toolName} decision=${decision} callId=${toolCallId ?? ""}`,
+          );
+        },
+        { priority: 100 },
+      );
+      api.logger.info(
+        `a2a-gateway: tool approval hook registered (tools=${config.toolApproval.tools?.join(",") || "*"}, timeoutMs=${config.toolApproval.timeoutMs ?? 120_000})`,
+      );
+    }
 
     // Peer resilience: health check + circuit breaker
     const healthManager = config.peers.length > 0

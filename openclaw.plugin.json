@@ -256,6 +256,29 @@
           }
         }
       },
+      "toolApproval": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Human-in-the-loop: pause agent turn before tool calls until A2A client approves.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Register before_tool_call hook that blocks until metadata.toolApproval arrives"
+          },
+          "tools": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Tool names that require approval. Empty/omit = all tools."
+          },
+          "timeoutMs": {
+            "type": "number",
+            "default": 120000,
+            "minimum": 5000,
+            "description": "Max wait for user decision before denying the tool call"
+          }
+        }
+      },
       "resilience": {
         "type": "object",
         "additionalProperties": false,

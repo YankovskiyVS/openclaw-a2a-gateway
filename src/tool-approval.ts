@@ -110,8 +110,10 @@ export function toolStatusFromPhase(
     return undefined;
   }
   switch (phase) {
+    // Real pause happens in before_tool_call via tool-approval-bridge.
+    // By the time the tool stream "start" fires, approval was already granted.
     case "start":
-      return "pending_approval";
+      return "running";
     case "update":
       return "running";
     case "result":

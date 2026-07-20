@@ -72,8 +72,18 @@ export interface SecurityConfig extends FileSecurityConfig {
 }
 
 export interface ToolApprovalConfig {
-  /** When true, tool artifacts include lifecycle status and exec approvals are bridged to A2A input-required. */
+  /**
+   * When true, register `before_tool_call` that pauses the agent turn until the
+   * A2A client sends metadata.toolApproval (allow-once / allow-always / deny).
+   */
   enabled: boolean;
+  /**
+   * Tool names that require approval. Empty / omitted = all tools.
+   * Example: ["exec", "write", "edit"].
+   */
+  tools?: string[];
+  /** How long to wait for a user decision before denying (ms). Default 120000. */
+  timeoutMs?: number;
 }
 
 export interface DnsDiscoveryConfig {

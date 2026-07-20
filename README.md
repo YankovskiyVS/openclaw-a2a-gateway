@@ -41,6 +41,7 @@ A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that 
 - **JSONL audit trail** for all A2A calls and security events
 - **Telemetry metrics** endpoint with optional bearer auth
 - **Durable task store** on disk with TTL cleanup and concurrency limits
+- **Tool approval (HITL)**: `before_tool_call` pauses the agent turn until the A2A client sends `metadata.toolApproval` (`allow-once` / `allow-always` / `deny`)
 
 ## Architecture
 
@@ -469,6 +470,24 @@ node <PLUGIN_PATH>/skill/scripts/a2a-send.mjs \
 | `security.maxFileSizeBytes` | number | `52428800` | Max file size for URI-based files (50MB) |
 | `security.maxInlineFileSizeBytes` | number | `10485760` | Max inline base64 file size (10MB) |
 | `security.fileUriAllowlist` | array | `[]` | URI hostname allowlist (empty = allow all public) |
+
+### Tool approval (human-in-the-loop)
+
+When enabled, the plugin registers `before_tool_call` and **awaits** an A2A client decision before the tool runs (OpenClaw 2026.3.x has no `requireApproval` yet — we pause via an in-process Promise and return `{ block: true }` on deny/timeout).
+
+| Path | Type | Default | Description |
+|------|------|---------|-------------|
+| `toolApproval.enabled` | boolean | `true` | Pause agent turn before tool calls |
+| `toolApproval.tools` | string[] | all tools | Only these tool names require approval (e.g. `["exec"]`) |
+| `toolApproval.timeoutMs` | number | `120000` | Deny if no decision arrives in time |
+
+Resume contract (same as BFF `SendToolApproval`): send an A2A message with empty text and
+
+```json
+{ "metadata": { "toolApproval": { "approvalId": "<id>", "callId": "<optional>", "decision": "allow-once" } } }
+```
+
+`decision`: `allow-once` | `allow-always` | `deny`. Keep `timeouts.agentResponseTimeoutMs` greater than `toolApproval.timeoutMs`.
 
 ### Routing
 
