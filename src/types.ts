@@ -71,6 +71,11 @@ export interface SecurityConfig extends FileSecurityConfig {
   validTokens: Set<string>;
 }
 
+export interface ToolApprovalConfig {
+  /** When true, tool artifacts include lifecycle status and exec approvals are bridged to A2A input-required. */
+  enabled: boolean;
+}
+
 export interface DnsDiscoveryConfig {
   enabled: boolean;
   /** DNS-SD service name to query. Default: "_a2a._tcp.local" */
@@ -94,6 +99,7 @@ export interface GatewayConfig {
   };
   peers: PeerConfig[];
   security: SecurityConfig;
+  toolApproval: ToolApprovalConfig;
   routing: {
     defaultAgentId: string;
     rules: import("./routing-rules.js").RoutingRule[];

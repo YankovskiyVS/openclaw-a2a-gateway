@@ -195,6 +195,10 @@ export function isTerminalTaskState(state: TaskState): boolean {
   return TERMINAL_TASK_STATES.has(state);
 }
 
+export function isPausedTaskState(state: TaskState): boolean {
+  return state === TaskState.TASK_STATE_INPUT_REQUIRED || state === TaskState.TASK_STATE_AUTH_REQUIRED;
+}
+
 export function normalizeTaskState(state: unknown): TaskState {
   if (typeof state === "number") {
     return state as TaskState;

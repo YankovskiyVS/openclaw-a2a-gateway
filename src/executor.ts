@@ -11,6 +11,7 @@ import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/s
 import {
   agentMessage,
   buildTask,
+  dataPart,
   emptyPart,
   publishStatusUpdate,
   publishTask,
@@ -20,6 +21,15 @@ import {
   urlPart,
 } from "./a2a/helpers.js";
 import type { GatewayConfig, OpenClawPluginApi } from "./types.js";
+import {
+  execApprovalCallId,
+  execApprovalToolName,
+  extractToolApprovalDecision,
+  isToolApprovalOnlyMessage,
+  toolStatusFromPhase,
+  type ExecApprovalRequestPayload,
+  type ToolApprovalDecision,
+} from "./tool-approval.js";
 import {
   validateMimeType,
   validateUriSchemeAndIp,
@@ -73,6 +83,7 @@ interface GatewayStreamContext {
   runId: string;
   textChunkIndex: number;
   streamedText: boolean;
+  toolApprovalEnabled: boolean;
 }
 
 function normalizeToolPayload(value: unknown): Record<string, unknown> | undefined {
@@ -131,6 +142,10 @@ function handleGatewayAgentEvent(
     name: toolName,
     phase,
   };
+  const status = toolStatusFromPhase(phase, stream.toolApprovalEnabled, data.isError === true);
+  if (status) {
+    toolData.status = status;
+  }
 
   if (phase === "start") {
     const input = normalizeToolPayload(data.args);
@@ -153,6 +168,68 @@ function handleGatewayAgentEvent(
   }
 
   publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, toolData);
+
+  if (stream.toolApprovalEnabled && phase === "start") {
+    publishStatusUpdate(
+      stream.eventBus,
+      stream.taskId,
+      stream.contextId,
+      TaskState.TASK_STATE_INPUT_REQUIRED,
+      {
+        statusMessage: agentMessage(stream.contextId, [
+          dataPart({
+            kind: "toolApproval",
+            approvalId: toolCallId,
+            callId: toolCallId,
+            name: toolName,
+          }),
+        ], stream.taskId),
+      },
+    );
+  }
+}
+
+function handleExecApprovalRequested(
+  request: ExecApprovalRequestPayload,
+  stream: GatewayStreamContext,
+): void {
+  const toolName = execApprovalToolName(request);
+  const callId = execApprovalCallId(request);
+  const req = request.request;
+  const input: Record<string, unknown> = {};
+  if (req?.command) {
+    input.command = req.command;
+  }
+  if (req?.cwd) {
+    input.cwd = req.cwd;
+  }
+
+  publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, {
+    kind: "tool",
+    callId,
+    name: toolName,
+    phase: "start",
+    status: "pending_approval",
+    approvalId: request.id,
+    input: Object.keys(input).length > 0 ? input : undefined,
+  });
+
+  publishStatusUpdate(
+    stream.eventBus,
+    stream.taskId,
+    stream.contextId,
+    TaskState.TASK_STATE_INPUT_REQUIRED,
+    {
+      statusMessage: agentMessage(stream.contextId, [
+        dataPart({
+          kind: "toolApproval",
+          approvalId: request.id,
+          callId,
+          name: toolName,
+        }),
+      ], stream.taskId),
+    },
+  );
 }
 
 function extractOpenAIStreamDelta(payload: unknown): string {
@@ -728,6 +805,7 @@ class GatewayRpcConnection {
   private readonly gatewayPassword: string;
   private readonly pending: Map<string, PendingGatewayRequest>;
   private readonly onAgentEvent?: (payload: Record<string, unknown>) => void;
+  private readonly onExecApprovalRequested?: (payload: ExecApprovalRequestPayload) => void;
   private socket: GatewayWebSocket | null;
   private messageListener: ((event: { data: unknown }) => void) | null;
   private closeListener: ((event: unknown) => void) | null;
@@ -737,11 +815,18 @@ class GatewayRpcConnection {
   private connectChallengeRejecter: ((error: Error) => void) | null;
   private challengeNonce: string;
 
-  constructor(config: GatewayRuntimeConfig, options?: { onAgentEvent?: (payload: Record<string, unknown>) => void }) {
+  constructor(
+    config: GatewayRuntimeConfig,
+    options?: {
+      onAgentEvent?: (payload: Record<string, unknown>) => void;
+      onExecApprovalRequested?: (payload: ExecApprovalRequestPayload) => void;
+    },
+  ) {
     this.wsUrl = config.wsUrl;
     this.gatewayToken = config.gatewayToken;
     this.gatewayPassword = config.gatewayPassword;
     this.onAgentEvent = options?.onAgentEvent;
+    this.onExecApprovalRequested = options?.onExecApprovalRequested;
     this.pending = new Map();
     this.socket = null;
     this.messageListener = null;
@@ -1156,6 +1241,13 @@ class GatewayRpcConnection {
         if (payload) {
           this.onAgentEvent(payload);
         }
+        return;
+      }
+      if (frame.event === "exec.approval.requested" && this.onExecApprovalRequested) {
+        const payload = asObject(frame.payload);
+        if (payload && typeof payload.id === "string") {
+          this.onExecApprovalRequested(payload as ExecApprovalRequestPayload);
+        }
       }
       return;
     }
@@ -1218,12 +1310,14 @@ export class OpenClawAgentExecutor implements AgentExecutor {
   private readonly modelOverrideAllowlist: string[];
   private readonly modelOverridePattern: RegExp;
   private readonly security: GatewayConfig["security"];
+  private readonly toolApprovalEnabled: boolean;
   private readonly taskContextByTaskId: Map<string, string>;
 
   constructor(api: OpenClawPluginApi, config: GatewayConfig) {
     this.api = api;
     this.defaultAgentId = config.routing.defaultAgentId;
     this.security = config.security;
+    this.toolApprovalEnabled = config.toolApproval?.enabled !== false;
 
     const configured = config.timeouts?.agentResponseTimeoutMs;
     this.agentResponseTimeoutMs =
@@ -1253,6 +1347,21 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const taskId = requestContext.taskId;
     const contextId = requestContext.contextId;
     this.rememberTaskContext(taskId, contextId);
+
+    const approvalDecision = extractToolApprovalDecision(requestContext.userMessage);
+    if (approvalDecision) {
+      try {
+        await this.resolveExecApproval(approvalDecision.decision, approvalDecision.approvalId);
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        this.api.logger.warn(`a2a-gateway: exec.approval.resolve skipped: ${errorMessage}`);
+      }
+      if (isToolApprovalOnlyMessage(requestContext.userMessage)) {
+        publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
+        eventBus.finished();
+        return;
+      }
+    }
 
     // Carry forward conversation history from previous rounds (if any).
     // The SDK's ResultManager replaces currentTask with { ...taskEvent }, so
@@ -1555,11 +1664,15 @@ export class OpenClawAgentExecutor implements AgentExecutor {
           runId,
           textChunkIndex: 0,
           streamedText: false,
+          toolApprovalEnabled: this.toolApprovalEnabled,
         }
       : undefined;
     const gateway = new GatewayRpcConnection(gatewayConfig, {
       onAgentEvent: gatewayStream
         ? (payload) => handleGatewayAgentEvent(payload, gatewayStream)
+        : undefined,
+      onExecApprovalRequested: gatewayStream && this.toolApprovalEnabled
+        ? (payload) => handleExecApprovalRequested(payload, gatewayStream)
         : undefined,
     });
 
@@ -1616,6 +1729,22 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       if (gatewayStream && streamContext) {
         streamContext.streamedText = gatewayStream.streamedText;
       }
+      gateway.close();
+    }
+  }
+
+  private async resolveExecApproval(decision: ToolApprovalDecision, approvalId: string): Promise<void> {
+    const gatewayConfig = this.resolveGatewayRuntimeConfig();
+    const gateway = new GatewayRpcConnection(gatewayConfig);
+    await gateway.connect();
+    try {
+      await gateway.request(
+        "exec.approval.resolve",
+        { id: approvalId, decision },
+        GATEWAY_REQUEST_TIMEOUT_MS,
+        false,
+      );
+    } finally {
       gateway.close();
     }
   }

@@ -234,6 +234,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
   const server = asObject(config.server);
   const storage = asObject(config.storage);
   const security = asObject(config.security);
+  const toolApproval = asObject(config.toolApproval);
   const routing = asObject(config.routing);
   const limits = asObject(config.limits);
   const observability = asObject(config.observability);
@@ -292,6 +293,9 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
         fileUriAllowlist,
       };
     })(),
+    toolApproval: {
+      enabled: asBoolean(toolApproval.enabled, true),
+    },
     routing: {
       defaultAgentId: asString(routing.defaultAgentId, "main"),
       rules: parseRoutingRules(routing.rules),
