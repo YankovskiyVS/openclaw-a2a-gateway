@@ -237,15 +237,23 @@ export class ToolApprovalBridge {
         stream.contextId,
         TaskState.TASK_STATE_WORKING,
       );
-    } else if (decision === "deny") {
+    } else if (decision === "deny" || decision === "timeout" || decision === "cancelled") {
+      // Clear PENDING_APPROVAL in the live stream so clients stop offering approve buttons.
       publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, {
         kind: "tool",
         callId,
         name: params.toolName,
         phase: "result",
-        status: "rejected",
+        status: decision === "deny" ? "rejected" : "failed",
         approvalId,
         input: params.params,
+        isError: decision !== "deny",
+        output: {
+          error:
+            decision === "deny"
+              ? `Tool "${params.toolName}" denied by user`
+              : `Tool "${params.toolName}" approval ${decision}`,
+        },
       });
     }
 
