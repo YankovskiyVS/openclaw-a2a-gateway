@@ -1351,6 +1351,11 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       }
       if (isToolApprovalOnlyMessage(requestContext.userMessage)) {
         // Ack-only message: decision was applied to the blocked agent turn.
+        publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
+          statusMessage: agentMessage(contextId, [
+            textPart("Tool approval recorded"),
+          ], taskId),
+        });
         eventBus.finished();
         return;
       }
