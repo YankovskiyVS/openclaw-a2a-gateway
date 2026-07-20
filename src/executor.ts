@@ -110,8 +110,10 @@ function handleGatewayAgentEvent(
   const data = asObject(payload.data) ?? {};
 
   if (streamKind === "assistant") {
-    const delta = asString(data.delta) ?? asString(data.text);
-    if (!delta) {
+    // Do NOT trim: LLM deltas often start/end with spaces (" слегка", " 👋").
+    // Trimming them glues words together in cumulative snapshots.
+    const delta = asRawString(data.delta) ?? asRawString(data.text);
+    if (delta == null || delta === "") {
       return;
     }
     publishTextArtifactChunk(
@@ -232,7 +234,8 @@ function extractOpenAIStreamDelta(payload: unknown): string {
   const choices = asArray(body?.choices);
   const firstChoice = asObject(choices[0]);
   const delta = asObject(firstChoice?.delta);
-  return asString(delta?.content) ?? "";
+  // Preserve leading/trailing whitespace on token deltas.
+  return asRawString(delta?.content) ?? "";
 }
 
 function pickAgentId(requestContext: RequestContext, fallbackAgentId: string): string {
@@ -260,6 +263,7 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+/** Trims identifiers / enums. Do not use for streamed text deltas. */
 function asString(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
@@ -267,6 +271,14 @@ function asString(value: unknown): string | undefined {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Exact string for stream deltas — keeps leading/trailing spaces. */
+function asRawString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return value;
 }
 
 function asFiniteNumber(value: unknown): number | undefined {
@@ -1360,7 +1372,16 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         }
       }
       if (isToolApprovalOnlyMessage(requestContext.userMessage)) {
-        // Ack-only message: decision was applied to the blocked agent turn.
+        // If this approval reused the live agent taskId, do NOT publish COMPLETED
+        // or finish the shared bus — the original execute() still owns it and will
+        // stream assistant text after before_tool_call unblocks.
+        if (toolApprovalBridge.hasActiveStream(taskId)) {
+          this.api.logger.info(
+            `a2a-gateway: tool approval applied on live task ${taskId}; leaving stream open`,
+          );
+          return;
+        }
+        // Fresh ack-only task (preferred): complete quickly without touching the agent run.
         publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
           statusMessage: agentMessage(contextId, [
             textPart("Tool approval recorded"),

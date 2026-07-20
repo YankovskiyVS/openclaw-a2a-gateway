@@ -96,6 +96,11 @@ export class ToolApprovalBridge {
     return this.awaitingTaskIds.has(taskId);
   }
 
+  /** True if an original agent execute() still owns this task's event bus. */
+  hasActiveStream(taskId: string): boolean {
+    return this.streamsByTaskId.has(taskId);
+  }
+
   /** True while before_tool_call is blocked for this tool call id. */
   isAwaitingCallId(callId: string | undefined): boolean {
     if (!callId) return false;
