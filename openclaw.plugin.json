@@ -127,6 +127,10 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "URI hostname allowlist patterns (e.g. \"*.example.com\"). Empty allows all public hosts."
+          },
+          "inboundMediaDir": {
+            "type": "string",
+            "description": "Directory under OpenClaw workspace for inbound inline files (pdf/zip tools). Default: ~/.openclaw/workspace/a2a-inbox"
           }
         }
       },

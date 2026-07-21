@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import plugin from "../index.js";
@@ -562,12 +563,12 @@ describe("a2a-gateway plugin", () => {
         "should include the filename",
       );
       assert.ok(
-        capturedMessage.includes("inline"),
-        "should mention inline for base64 content",
+        capturedMessage.includes("a2a-inbox") || capturedMessage.includes(path.sep),
+        "should include materialized workspace path for tools",
       );
       assert.ok(
-        capturedMessage.includes("KB"),
-        "should include size hint",
+        capturedMessage.includes("absolute path") || capturedMessage.includes("→"),
+        "should instruct tools to use absolute path",
       );
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;

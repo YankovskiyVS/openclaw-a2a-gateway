@@ -249,8 +249,18 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
   const inboundAuth = asString(security.inboundAuth, "none") as InboundAuth;
 
   const defaultMimeTypes = [
-    "image/*", "application/pdf", "text/plain", "text/csv",
-    "application/json", "audio/*", "video/*",
+    "image/*",
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "application/json",
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/gzip",
+    "application/x-tar",
+    "application/x-7z-compressed",
+    "audio/*",
+    "video/*",
   ];
   const rawAllowedMime = Array.isArray(security.allowedMimeTypes) ? security.allowedMimeTypes : [];
   const allowedMimeTypes = rawAllowedMime.length > 0
@@ -258,6 +268,11 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     : defaultMimeTypes;
   const rawUriAllowlist = Array.isArray(security.fileUriAllowlist) ? security.fileUriAllowlist : [];
   const fileUriAllowlist = rawUriAllowlist.filter((v: unknown) => typeof v === "string") as string[];
+  const inboundMediaDir = resolveConfiguredPath(
+    security.inboundMediaDir,
+    path.join(os.homedir(), ".openclaw", "workspace", "a2a-inbox"),
+    resolvePath,
+  );
 
   return {
     agentCard: parseAgentCard(asObject(config.agentCard)),
@@ -292,6 +307,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
         maxFileSizeBytes: asNumber(security.maxFileSizeBytes, 52_428_800),
         maxInlineFileSizeBytes: asNumber(security.maxInlineFileSizeBytes, 10_485_760),
         fileUriAllowlist,
+        inboundMediaDir,
       };
     })(),
     toolApproval: {

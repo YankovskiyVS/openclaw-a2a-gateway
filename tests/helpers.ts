@@ -4,6 +4,8 @@
  * Provides: mock factories, config builders, plugin registration helpers.
  */
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 
 import { TaskState } from "@a2a-js/sdk";
 
@@ -58,10 +60,24 @@ export function makeConfig(overrides: Record<string, unknown> = {}): Record<stri
     peers: [],
     security: {
       inboundAuth: "none",
-      allowedMimeTypes: ["image/*", "application/pdf", "text/plain", "text/csv", "application/json", "audio/*", "video/*"],
+      allowedMimeTypes: [
+        "image/*",
+        "application/pdf",
+        "text/plain",
+        "text/csv",
+        "application/json",
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/gzip",
+        "application/x-tar",
+        "application/x-7z-compressed",
+        "audio/*",
+        "video/*",
+      ],
       maxFileSizeBytes: 52_428_800,
       maxInlineFileSizeBytes: 10_485_760,
       fileUriAllowlist: [],
+      inboundMediaDir: path.join(os.tmpdir(), "a2a-inbox-test"),
     },
     routing: {
       defaultAgentId: "default-agent",

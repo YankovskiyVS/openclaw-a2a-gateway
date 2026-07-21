@@ -26,6 +26,7 @@ function defaultConfig(overrides?: Partial<FileSecurityConfig>): FileSecurityCon
     maxFileSizeBytes: 52_428_800,
     maxInlineFileSizeBytes: 10_485_760,
     fileUriAllowlist: [],
+    inboundMediaDir: "/tmp/a2a-inbox-test",
     ...overrides,
   };
 }

@@ -38,6 +38,10 @@ import {
   decodedBase64Size,
   sanitizeUriForLog,
 } from "./file-security.js";
+import {
+  localPathIndex,
+  materializeInboundInlineFiles,
+} from "./inbound-media.js";
 
 const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
 const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 60_000;
@@ -404,11 +408,14 @@ function formatDataPartAsText(obj: Record<string, unknown>): string {
  * Format an A2A FilePart as human-readable text for the OpenClaw agent.
  *
  * The Gateway RPC `agent` method only accepts a `message: string` parameter,
- * so file parts must be serialized into text. URI-based files include the URL
- * so the agent can reference or fetch them; inline base64 text-like files include
- * decoded content so the agent can read them; other inline files include a size hint.
+ * so file parts must be serialized into text. URI-based files include the URL;
+ * inline files are materialized under the OpenClaw workspace and the absolute
+ * path is included so tools (pdf, etc.) can open them.
  */
-function formatFilePartAsText(obj: Record<string, unknown>): string {
+function formatFilePartAsText(
+  obj: Record<string, unknown>,
+  localPaths?: Map<string, string>,
+): string {
   const file = asObject(obj.file) || obj;
   if (!file) {
     return "";
@@ -426,10 +433,23 @@ function formatFilePartAsText(obj: Record<string, unknown>): string {
   const name = rawName.replace(/[\r\n\t\x00-\x1f]/g, "").slice(0, 200);
   const mimeType = rawMimeType.replace(/[\r\n\t\x00-\x1f]/g, "").slice(0, 100);
 
+  const localPath =
+    localPaths?.get(name) ||
+    localPaths?.get(rawName) ||
+    (typeof asString(obj.localPath) === "string" ? asString(obj.localPath) : undefined);
+
+  // Prefer materialized workspace path for tools (pdf/zip/…).
+  if (localPath) {
+    return [
+      `[Attached: ${name} (${mimeType}) → ${localPath}]`,
+      `Use the absolute path above with tools (pdf, read, etc). Do not pass only the filename.`,
+    ].join("\n");
+  }
+
   // URI-based file (legacy FilePart or a2a-go flattened url)
   const uri = asString(file.uri) || asString(obj.url);
   if (uri) {
-    return `[Attached: ${name} (${mimeType}) \u2192 ${uri}]`;
+    return `[Attached: ${name} (${mimeType}) → ${uri}]`;
   }
 
   // Base64-encoded inline file (legacy FilePart.bytes or a2a-go raw)
@@ -475,14 +495,14 @@ function bufferOrStringToBase64(value: unknown): string | undefined {
   return undefined;
 }
 
-function extractTextFragments(value: unknown): string[] {
+function extractTextFragments(value: unknown, localPaths?: Map<string, string>): string[] {
   if (typeof value === "string") {
     const trimmed = value.trim();
     return trimmed ? [trimmed] : [];
   }
 
   if (Array.isArray(value)) {
-    return value.flatMap((entry) => extractTextFragments(entry));
+    return value.flatMap((entry) => extractTextFragments(entry, localPaths));
   }
 
   const obj = asObject(value);
@@ -504,7 +524,7 @@ function extractTextFragments(value: unknown): string[] {
       filename: obj.filename,
       mediaType: obj.mediaType || obj.mimeType,
       raw: bufferOrStringToBase64(partContent.value),
-    });
+    }, localPaths);
     return description ? [description] : [];
   }
 
@@ -519,7 +539,7 @@ function extractTextFragments(value: unknown): string[] {
 
   // Handle A2A FilePart: format as human-readable text for the agent
   if (obj.kind === "file") {
-    const description = formatFilePartAsText(obj);
+    const description = formatFilePartAsText(obj, localPaths);
     return description ? [description] : [];
   }
 
@@ -528,7 +548,7 @@ function extractTextFragments(value: unknown): string[] {
     const description = formatFilePartAsText({
       ...obj,
       raw: bufferOrStringToBase64(obj.raw) ?? obj.raw,
-    });
+    }, localPaths);
     return description ? [description] : [];
   }
 
@@ -540,12 +560,12 @@ function extractTextFragments(value: unknown): string[] {
 
   const parts = Array.isArray(obj.parts) ? obj.parts : [];
   if (parts.length > 0) {
-    return parts.flatMap((part) => extractTextFragments(part));
+    return parts.flatMap((part) => extractTextFragments(part, localPaths));
   }
 
   const content = Array.isArray(obj.content) ? obj.content : [];
   if (content.length > 0) {
-    return content.flatMap((entry) => extractTextFragments(entry));
+    return content.flatMap((entry) => extractTextFragments(entry, localPaths));
   }
 
   if (typeof obj.text === "string") {
@@ -556,8 +576,8 @@ function extractTextFragments(value: unknown): string[] {
   return [];
 }
 
-function extractInboundMessageText(message: unknown): string {
-  const fragments = extractTextFragments(message);
+function extractInboundMessageText(message: unknown, localPaths?: Map<string, string>): string {
+  const fragments = extractTextFragments(message, localPaths);
   if (fragments.length > 0) {
     return fragments.join("\n");
   }
@@ -1497,6 +1517,24 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       return;
     }
 
+    // Write inline files into OpenClaw workspace so pdf/zip tools get an allowed absolute path.
+    let localPaths: Map<string, string> | undefined;
+    try {
+      const materialized = materializeInboundInlineFiles(
+        requestContext.userMessage,
+        this.security.inboundMediaDir,
+      );
+      if (materialized.length > 0) {
+        localPaths = localPathIndex(materialized);
+        this.api.logger.info(
+          `a2a-gateway: materialized ${materialized.length} inbound file(s) under ${this.security.inboundMediaDir}`,
+        );
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.api.logger.warn(`a2a-gateway: failed to materialize inbound files: ${message}`);
+    }
+
     if (this.isQueuedTask(requestContext)) {
       publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
     } else {
@@ -1533,6 +1571,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
           contextId,
           validatedModelRef,
           { eventBus, taskId, contextId },
+          localPaths,
         );
         streamedViaOpenAI = true;
       } else {
@@ -1542,6 +1581,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
           requestContext.userMessage,
           contextId,
           gatewayStreamCtx,
+          localPaths,
         );
         streamedViaGateway = gatewayStreamCtx.streamedText === true;
       }
@@ -1629,8 +1669,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     contextId: string,
     modelOverride: string,
     streamOptions?: OpenAIStreamOptions,
+    localPaths?: Map<string, string>,
   ): Promise<AgentResponse> {
-    const messageText = extractInboundMessageText(userMessage);
+    const messageText = extractInboundMessageText(userMessage, localPaths);
     const gatewayConfig = this.resolveGatewayRuntimeConfig();
     const sessionKey = `agent:${agentId}:a2a:${contextId}`;
     const openclawModelId = agentId === this.defaultAgentId
@@ -1753,8 +1794,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     userMessage: unknown,
     contextId: string,
     streamContext?: Pick<GatewayStreamContext, "eventBus" | "taskId" | "contextId"> & { streamedText?: boolean },
+    localPaths?: Map<string, string>,
   ): Promise<AgentResponse> {
-    const messageText = extractInboundMessageText(userMessage);
+    const messageText = extractInboundMessageText(userMessage, localPaths);
     const gatewayConfig = this.resolveGatewayRuntimeConfig();
     const runId = uuidv4();
     const sessionKey = `agent:${agentId}:a2a:${contextId}`;

@@ -61,6 +61,11 @@ export interface FileSecurityConfig {
   maxInlineFileSizeBytes: number;
   /** URI hostname allowlist patterns (e.g. "*.example.com"). Empty = allow all public hosts. */
   fileUriAllowlist: string[];
+  /**
+   * Directory under OpenClaw workspace where inbound inline files are written
+   * so tools (pdf, etc.) can open them. Default: ~/.openclaw/workspace/a2a-inbox
+   */
+  inboundMediaDir: string;
 }
 
 export interface SecurityConfig extends FileSecurityConfig {
