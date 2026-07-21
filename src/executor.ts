@@ -405,36 +405,61 @@ function formatDataPartAsText(obj: Record<string, unknown>): string {
  *
  * The Gateway RPC `agent` method only accepts a `message: string` parameter,
  * so file parts must be serialized into text. URI-based files include the URL
- * so the agent can reference or fetch them; inline base64 files include a size
- * hint since the raw bytes cannot be forwarded through the text channel.
+ * so the agent can reference or fetch them; inline base64 text-like files include
+ * decoded content so the agent can read them; other inline files include a size hint.
  */
 function formatFilePartAsText(obj: Record<string, unknown>): string {
-  const file = asObject(obj.file);
+  const file = asObject(obj.file) || obj;
   if (!file) {
     return "";
   }
 
   // Sanitize name/mimeType: strip control chars and newlines to prevent
   // format injection when embedded in the agent message text.
-  const rawName = asString(file.name) || "file";
-  const rawMimeType = asString(file.mimeType) || "application/octet-stream";
+  const rawName = asString(file.name) || asString(file.filename) || asString(obj.filename) || "file";
+  const rawMimeType =
+    asString(file.mimeType) ||
+    asString(file.mediaType) ||
+    asString(obj.mediaType) ||
+    asString(obj.mimeType) ||
+    "application/octet-stream";
   const name = rawName.replace(/[\r\n\t\x00-\x1f]/g, "").slice(0, 200);
   const mimeType = rawMimeType.replace(/[\r\n\t\x00-\x1f]/g, "").slice(0, 100);
 
-  // URI-based file
-  const uri = asString(file.uri);
+  // URI-based file (legacy FilePart or a2a-go flattened url)
+  const uri = asString(file.uri) || asString(obj.url);
   if (uri) {
     return `[Attached: ${name} (${mimeType}) \u2192 ${uri}]`;
   }
 
-  // Base64-encoded inline file
-  const bytes = asString(file.bytes);
+  // Base64-encoded inline file (legacy FilePart.bytes or a2a-go raw)
+  const bytes = asString(file.bytes) || asString(obj.raw);
   if (bytes) {
     const sizeKB = Math.ceil(decodedBase64Size(bytes) / 1024);
+    if (isTextLikeMime(mimeType)) {
+      try {
+        const decoded = Buffer.from(bytes, "base64").toString("utf8");
+        const clipped = decoded.length > 100_000 ? `${decoded.slice(0, 100_000)}\n…[truncated]` : decoded;
+        return `[Attached: ${name} (${mimeType})]\n${clipped}`;
+      } catch {
+        // fall through to size hint
+      }
+    }
     return `[Attached: ${name} (${mimeType}), inline ${sizeKB}KB]`;
   }
 
   return `[Attached: ${name} (${mimeType})]`;
+}
+
+function isTextLikeMime(mimeType: string): boolean {
+  const mime = mimeType.toLowerCase().split(";")[0]?.trim() || "";
+  return (
+    mime.startsWith("text/") ||
+    mime === "application/json" ||
+    mime === "application/xml" ||
+    mime === "application/javascript" ||
+    mime === "application/csv"
+  );
 }
 
 function extractTextFragments(value: unknown): string[] {
@@ -472,6 +497,12 @@ function extractTextFragments(value: unknown): string[] {
 
   // Handle A2A FilePart: format as human-readable text for the agent
   if (obj.kind === "file") {
+    const description = formatFilePartAsText(obj);
+    return description ? [description] : [];
+  }
+
+  // a2a-go v2 flattened file parts: { raw|url, filename, mediaType }
+  if (typeof obj.raw === "string" || typeof obj.url === "string") {
     const description = formatFilePartAsText(obj);
     return description ? [description] : [];
   }
@@ -1896,7 +1927,19 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         continue;
       }
       if (typeof part.url === "string") {
-        results.push({ uri: part.url, mimeType: asString(part.mediaType) || asString(part.mimeType) });
+        results.push({
+          uri: part.url,
+          mimeType: asString(part.mediaType) || asString(part.mimeType),
+          name: asString(part.filename),
+        });
+        continue;
+      }
+      if (typeof part.raw === "string") {
+        results.push({
+          bytes: part.raw,
+          mimeType: asString(part.mediaType) || asString(part.mimeType),
+          name: asString(part.filename),
+        });
         continue;
       }
       if (part.kind === "file" && part.file) {
