@@ -462,6 +462,19 @@ function isTextLikeMime(mimeType: string): boolean {
   );
 }
 
+function bufferOrStringToBase64(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("base64");
+  }
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value).toString("base64");
+  }
+  return undefined;
+}
+
 function extractTextFragments(value: unknown): string[] {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -485,6 +498,15 @@ function extractTextFragments(value: unknown): string[] {
   if (partContent?.$case === "url" && typeof partContent.value === "string") {
     return [`[Attached: ${partContent.value}]`];
   }
+  // a2a-js SDK hydrates raw parts as { content: { $case: "raw", value: Buffer } }
+  if (partContent?.$case === "raw") {
+    const description = formatFilePartAsText({
+      filename: obj.filename,
+      mediaType: obj.mediaType || obj.mimeType,
+      raw: bufferOrStringToBase64(partContent.value),
+    });
+    return description ? [description] : [];
+  }
 
   if (obj.kind === "text" && typeof obj.text === "string") {
     const trimmed = obj.text.trim();
@@ -502,8 +524,11 @@ function extractTextFragments(value: unknown): string[] {
   }
 
   // a2a-go v2 flattened file parts: { raw|url, filename, mediaType }
-  if (typeof obj.raw === "string" || typeof obj.url === "string") {
-    const description = formatFilePartAsText(obj);
+  if (typeof obj.raw === "string" || typeof obj.url === "string" || Buffer.isBuffer(obj.raw)) {
+    const description = formatFilePartAsText({
+      ...obj,
+      raw: bufferOrStringToBase64(obj.raw) ?? obj.raw,
+    });
     return description ? [description] : [];
   }
 
@@ -1877,7 +1902,11 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       const legacyFile = asObject(part.file);
       const uri = asString(part.uri) || asString(legacyFile?.uri);
       const mimeType = asString(part.mimeType) || asString(legacyFile?.mimeType);
-      const bytes = asString(part.bytes) || asString(legacyFile?.bytes);
+      const bytes =
+        asString(part.bytes) ||
+        asString(legacyFile?.bytes) ||
+        bufferOrStringToBase64(part.bytes) ||
+        bufferOrStringToBase64(legacyFile?.bytes);
 
       // URI-based file: scheme + IP literal check + MIME
       if (uri) {
@@ -1923,7 +1952,11 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         continue;
       }
       if (content?.$case === "raw") {
-        results.push({ bytes: content.value, mimeType: asString(part.mediaType) || asString(part.mimeType) });
+        results.push({
+          bytes: bufferOrStringToBase64(content.value) ?? content.value,
+          mimeType: asString(part.mediaType) || asString(part.mimeType),
+          name: asString(part.filename),
+        });
         continue;
       }
       if (typeof part.url === "string") {

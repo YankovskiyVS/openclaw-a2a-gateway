@@ -637,6 +637,9 @@ const plugin = {
     app.use(
       "/a2a/jsonrpc",
       createHttpMetricsMiddleware("jsonrpc"),
+      // Default express.json() limit is 100kb — inline file parts (base64) exceed it quickly.
+      // Parse here with a higher limit so the SDK's inner express.json() is a no-op.
+      express.json({ limit: "35mb" }),
       jsonRpcHandler({
         requestHandler,
         userBuilder,
@@ -650,6 +653,16 @@ const plugin = {
         return;
       }
 
+      const payloadErr = err as { type?: string; status?: number; statusCode?: number; message?: string } | undefined;
+      if (
+        payloadErr?.type === "entity.too.large" ||
+        payloadErr?.status === 413 ||
+        payloadErr?.statusCode === 413
+      ) {
+        res.status(413).json(jsonRpcError(null, -32600, payloadErr.message || "Request entity too large"));
+        return;
+      }
+
       // Surface A2A-specific errors with proper codes
       const a2aErr = err as { code?: number; message?: string; taskId?: string } | undefined;
       if (a2aErr && typeof a2aErr.code === "number") {
@@ -659,12 +672,15 @@ const plugin = {
       }
 
       // Generic internal error
+      const message = err instanceof Error ? err.message : String(err);
+      api.logger.error(`a2a-gateway: jsonrpc unhandled error: ${message}`);
       res.status(500).json(jsonRpcError(null, -32603, "Internal error"));
     });
 
     app.use(
       "/a2a/rest",
       createHttpMetricsMiddleware("rest"),
+      express.json({ limit: "35mb" }),
       restHandler({
         requestHandler,
         userBuilder,
