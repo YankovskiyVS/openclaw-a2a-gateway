@@ -1909,6 +1909,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const config = asObject(this.api.config) || {};
     const gateway = asObject(config.gateway) || {};
     const gatewayAuth = asObject(gateway.auth) || {};
+    const gatewayRemote = asObject(gateway.remote) || {};
     const hooks = asObject(config.hooks) || {};
     const gatewayTls = asObject(gateway.tls) || {};
 
@@ -1917,13 +1918,27 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const scheme = tlsEnabled ? "wss" : "ws";
     const httpScheme = tlsEnabled ? "https" : "http";
 
+    // Local client resolution mirrors OpenClaw docs:
+    // OPENCLAW_GATEWAY_TOKEN -> gateway.auth.token -> gateway.remote.token
+    // (auth.token may be SecretRef / redacted in api.config while env still has the value).
+    const gatewayToken =
+      asString(process.env.OPENCLAW_GATEWAY_TOKEN) ||
+      asString(gatewayAuth.token) ||
+      asString(gatewayRemote.token) ||
+      "";
+    const gatewayPassword =
+      asString(process.env.OPENCLAW_GATEWAY_PASSWORD) ||
+      asString(gatewayAuth.password) ||
+      asString(gatewayRemote.password) ||
+      "";
+
     return {
       port,
       wsUrl: `${scheme}://localhost:${port}`,
       openAIChatCompletionsUrl: `${httpScheme}://localhost:${port}/v1/chat/completions`,
       hooksWakeUrl: `http://localhost:${port}/hooks/wake`,
-      gatewayToken: asString(gatewayAuth.token) || "",
-      gatewayPassword: asString(gatewayAuth.password) || "",
+      gatewayToken,
+      gatewayPassword,
       hooksToken: asString(hooks.token) || "",
     };
   }
