@@ -61,6 +61,16 @@ function summarizeParams(params: Record<string, unknown>): string {
   }
 }
 
+function normalizeToolPayload(value: unknown): Record<string, unknown> | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return { value };
+}
+
 /** Normalize OpenClaw / A2A session key variants for Map lookup. */
 export function normalizeSessionKey(sessionKey: string | undefined): string | undefined {
   const raw = (sessionKey || "").trim();
@@ -426,6 +436,53 @@ export class ToolApprovalBridge {
     }
 
     return decision;
+  }
+
+  /**
+   * Publish terminal tool status after OpenClaw finishes executing a tool.
+   * Prefer this over relying solely on agent-stream "tool/result" events —
+   * those can arrive without `name` or be filtered, leaving the A2A UI on RUNNING.
+   */
+  publishToolResult(params: {
+    toolName: string;
+    toolCallId?: string;
+    runId?: string;
+    sessionKey?: string;
+    result?: unknown;
+    error?: string;
+    isError?: boolean;
+  }): boolean {
+    const callId = (params.toolCallId || "").trim();
+    if (!callId) {
+      return false;
+    }
+    const stream = this.findStream({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+    });
+    if (!stream) {
+      return false;
+    }
+    this.aliasRunId(params.runId, stream.runId);
+
+    const failed = params.isError === true || Boolean(params.error);
+    const output =
+      params.result != null
+        ? normalizeToolPayload(params.result)
+        : params.error
+          ? { error: params.error }
+          : undefined;
+
+    publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, {
+      kind: "tool",
+      callId,
+      name: params.toolName || "tool",
+      phase: "result",
+      status: failed ? "failed" : "completed",
+      ...(failed ? { isError: true } : {}),
+      ...(output ? { output } : {}),
+    });
+    return true;
   }
 
   /**

@@ -106,6 +106,16 @@ export function toolStatusFromPhase(
   toolApprovalEnabled: boolean,
   isError?: boolean,
 ): string | undefined {
+  // Terminal phases always carry a status so the UI can leave RUNNING.
+  // OpenClaw may omit toolApproval config while still streaming tool events.
+  switch (phase) {
+    case "result":
+      return isError ? "failed" : "completed";
+    case "error":
+      return "failed";
+    default:
+      break;
+  }
   if (!toolApprovalEnabled) {
     return undefined;
   }
@@ -113,14 +123,8 @@ export function toolStatusFromPhase(
     // Real pause happens in before_tool_call via tool-approval-bridge.
     // By the time the tool stream "start" fires, approval was already granted.
     case "start":
-      return "running";
     case "update":
       return "running";
-    case "result":
-      if (isError) {
-        return "failed";
-      }
-      return "completed";
     default:
       return undefined;
   }

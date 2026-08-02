@@ -498,8 +498,40 @@ const plugin = {
         },
         { priority: 100 },
       );
+      // Reliable terminal status: agent-stream "tool/result" is easy to miss
+      // (missing name, filtered emit). after_tool_call always fires in-process.
+      api.on(
+        "after_tool_call",
+        (event, ctx) => {
+          const toolName = event.toolName || ctx.toolName || "tool";
+          const toolCallId = event.toolCallId ?? ctx.toolCallId;
+          const runId = event.runId ?? ctx.runId;
+          const sessionKey = ctx.sessionKey;
+          const isError =
+            Boolean(event.error) ||
+            (event.result != null &&
+              typeof event.result === "object" &&
+              !Array.isArray(event.result) &&
+              (event.result as { isError?: unknown }).isError === true);
+          const published = toolApprovalBridge.publishToolResult({
+            toolName,
+            toolCallId,
+            runId,
+            sessionKey,
+            result: event.result,
+            error: event.error,
+            isError,
+          });
+          if (published) {
+            api.logger.info(
+              `a2a-gateway: tool ${toolName} ${isError ? "failed" : "completed"} callId=${toolCallId ?? ""}`,
+            );
+          }
+        },
+        { priority: 100 },
+      );
       api.logger.info(
-        `a2a-gateway: tool approval hook registered (tools=${config.toolApproval.tools?.join(",") || "*"}, timeoutMs=${config.toolApproval.timeoutMs ?? 120_000})`,
+        `a2a-gateway: tool approval hooks registered (before+after, tools=${config.toolApproval.tools?.join(",") || "*"}, timeoutMs=${config.toolApproval.timeoutMs ?? 120_000})`,
       );
     }
 

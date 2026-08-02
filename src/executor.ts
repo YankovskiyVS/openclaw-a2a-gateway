@@ -96,6 +96,8 @@ interface GatewayStreamContext {
   textChunkIndex: number;
   streamedText: boolean;
   toolApprovalEnabled: boolean;
+  /** OpenClaw result events sometimes omit `name`; remember it from start. */
+  toolNamesByCallId: Map<string, string>;
 }
 
 function normalizeToolPayload(value: unknown): Record<string, unknown> | undefined {
@@ -141,14 +143,29 @@ function handleGatewayAgentEvent(
     return;
   }
 
-  if (streamKind !== "tool") {
+  // Prefer stream "tool"; also accept stream "item" tool end (OpenClaw activity feed).
+  const itemKind = asString(data.kind);
+  const isToolItem =
+    streamKind === "item" && itemKind === "tool" && asString(data.phase) === "end";
+  if (streamKind !== "tool" && !isToolItem) {
     return;
   }
 
-  const phase = asString(data.phase);
+  const phase = isToolItem ? "result" : asString(data.phase);
   const toolCallId = asString(data.toolCallId);
-  const toolName = asString(data.name);
-  if (!phase || !toolCallId || !toolName) {
+  if (!phase || !toolCallId) {
+    return;
+  }
+
+  let toolName = asString(data.name) ?? stream.toolNamesByCallId.get(toolCallId);
+  if (toolName) {
+    stream.toolNamesByCallId.set(toolCallId, toolName);
+  }
+  // Result/error events may omit name (docs / older OpenClaw). Still publish terminal status.
+  if (!toolName && (phase === "result" || phase === "error")) {
+    toolName = "tool";
+  }
+  if (!toolName) {
     return;
   }
 
@@ -162,13 +179,22 @@ function handleGatewayAgentEvent(
     return;
   }
 
+  const isError =
+    data.isError === true ||
+    asString(data.status) === "failed" ||
+    phase === "error";
+
   const toolData: Record<string, unknown> = {
     kind: "tool",
     callId: toolCallId,
     name: toolName,
-    phase,
+    phase: phase === "error" ? "result" : phase,
   };
-  const status = toolStatusFromPhase(phase, stream.toolApprovalEnabled, data.isError === true);
+  const status = toolStatusFromPhase(
+    phase === "error" ? "error" : phase,
+    stream.toolApprovalEnabled,
+    isError,
+  );
   if (status) {
     toolData.status = status;
   }
@@ -183,12 +209,12 @@ function handleGatewayAgentEvent(
     if (output) {
       toolData.output = output;
     }
-  } else if (phase === "result") {
-    const output = normalizeToolPayload(data.result);
+  } else if (phase === "result" || phase === "error") {
+    const output = normalizeToolPayload(data.result) ?? normalizeToolPayload(data.error);
     if (output) {
       toolData.output = output;
     }
-    if (data.isError === true) {
+    if (isError) {
       toolData.isError = true;
     }
   }
@@ -2021,6 +2047,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
           textChunkIndex: 0,
           streamedText: false,
           toolApprovalEnabled: this.toolApprovalEnabled,
+          toolNamesByCallId: new Map(),
         }
       : undefined;
     const gateway = new GatewayRpcConnection(gatewayConfig, {

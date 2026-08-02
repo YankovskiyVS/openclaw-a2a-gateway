@@ -226,4 +226,31 @@ describe("ToolApprovalBridge", () => {
     assert.ok(bus.events.length >= 1, "expected running artifact for allow-always shortcut");
     bridge.unregisterStream("run-7");
   });
+
+  it("publishToolResult emits completed status on the A2A bus", () => {
+    const bridge = new ToolApprovalBridge();
+    const bus = mockEventBus();
+    bridge.registerStream({
+      eventBus: bus as never,
+      taskId: "task-8",
+      contextId: "ctx-8",
+      runId: "run-8",
+      sessionKey: "agent:main:a2a:ctx-8",
+    });
+
+    const published = bridge.publishToolResult({
+      toolName: "exec",
+      toolCallId: "call-8",
+      runId: "run-8",
+      sessionKey: "agent:main:a2a:ctx-8",
+      result: { stdout: "ok" },
+    });
+    assert.equal(published, true);
+    assert.equal(bus.events.length, 1);
+    const raw = JSON.stringify(bus.events[0]);
+    assert.match(raw, /"status":"completed"/);
+    assert.match(raw, /"phase":"result"/);
+    assert.match(raw, /"callId":"call-8"/);
+    bridge.unregisterStream("run-8");
+  });
 });
