@@ -441,14 +441,13 @@ const plugin = {
     // Human-in-the-loop: pause agent turn in before_tool_call until A2A client
     // sends metadata.toolApproval. (OpenClaw 2026.3.2 has no requireApproval —
     // we await a Promise and return { block } on deny/timeout.)
-    // Guard against double register() (plugin reload / duplicate module entry):
-    // a second before_tool_call on an empty bridge module returns allow-once and
-    // unblocks tools before the real HITL wait finishes.
-    const hookGuard = globalThis as typeof globalThis & {
-      __openclaw_a2a_tool_approval_hook_registered__?: boolean;
-    };
-    if (config.toolApproval.enabled && !hookGuard.__openclaw_a2a_tool_approval_hook_registered__) {
-      hookGuard.__openclaw_a2a_tool_approval_hook_registered__ = true;
+    //
+    // Always (re)register on plugin register(). OpenClaw hot-reloads plugins and
+    // drops previous hook listeners; a global "already registered" flag then leaves
+    // ZERO hooks → tools run with no A2A pending_approval (production bug).
+    // Duplicate hooks are safe: toolApprovalBridge is a process-wide singleton and
+    // dedupes in-flight waits by callId.
+    if (config.toolApproval.enabled) {
       api.on(
         "before_tool_call",
         async (event, ctx) => {
@@ -499,8 +498,6 @@ const plugin = {
       api.logger.info(
         `a2a-gateway: tool approval hook registered (tools=${config.toolApproval.tools?.join(",") || "*"}, timeoutMs=${config.toolApproval.timeoutMs ?? 120_000})`,
       );
-    } else if (config.toolApproval.enabled) {
-      api.logger.info("a2a-gateway: tool approval hook already registered — skipping duplicate");
     }
 
     // Peer resilience: health check + circuit breaker
