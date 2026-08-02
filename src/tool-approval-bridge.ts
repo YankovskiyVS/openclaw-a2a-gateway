@@ -58,6 +58,8 @@ export class ToolApprovalBridge {
   private readonly streamsByRunId = new Map<string, ActiveApprovalStream>();
   private readonly streamsBySessionKey = new Map<string, ActiveApprovalStream>();
   private readonly streamsByTaskId = new Map<string, ActiveApprovalStream>();
+  /** OpenClaw runId (chatcmpl_*) → A2A stream runId (idempotencyKey). */
+  private readonly runIdAliases = new Map<string, string>();
   private readonly pendingByApprovalId = new Map<string, PendingApproval>();
   private readonly pendingByCallId = new Map<string, PendingApproval>();
   /** sessionKey → toolName → true after allow-always */
@@ -72,6 +74,22 @@ export class ToolApprovalBridge {
     }
   }
 
+  /**
+   * Map OpenClaw-native runId onto an A2A stream so before_tool_call can find it.
+   * Safe no-op when ids are empty or already the stream's own runId.
+   */
+  aliasRunId(openClawRunId: string | undefined, a2aRunId: string | undefined): void {
+    const from = (openClawRunId || "").trim();
+    const to = (a2aRunId || "").trim();
+    if (!from || !to || from === to) {
+      return;
+    }
+    if (!this.streamsByRunId.has(to)) {
+      return;
+    }
+    this.runIdAliases.set(from, to);
+  }
+
   unregisterStream(runId: string): void {
     const stream = this.streamsByRunId.get(runId);
     if (!stream) return;
@@ -81,6 +99,11 @@ export class ToolApprovalBridge {
       const current = this.streamsBySessionKey.get(stream.sessionKey);
       if (current?.runId === runId) {
         this.streamsBySessionKey.delete(stream.sessionKey);
+      }
+    }
+    for (const [alias, target] of [...this.runIdAliases.entries()]) {
+      if (target === runId || alias === runId) {
+        this.runIdAliases.delete(alias);
       }
     }
     this.awaitingTaskIds.delete(stream.taskId);
@@ -131,19 +154,31 @@ export class ToolApprovalBridge {
     if (params.runId) {
       const byRun = this.streamsByRunId.get(params.runId);
       if (byRun) return byRun;
+      const aliased = this.runIdAliases.get(params.runId);
+      if (aliased) {
+        const byAlias = this.streamsByRunId.get(aliased);
+        if (byAlias) return byAlias;
+      }
     }
     if (params.sessionKey) {
       const forSession = [...this.streamsByRunId.values()].filter(
         (stream) => stream.sessionKey === params.sessionKey,
       );
-      // Safe only when a single A2A turn owns the session; otherwise wrong-bus
-      // routing is worse than skipping HITL (caller returns allow-once).
       if (forSession.length === 1) {
         return forSession[0];
       }
-      return undefined;
+      if (forSession.length > 1) {
+        // Prefer a stream already waiting on HITL; else the latest registered
+        // for this session (last writer in streamsBySessionKey).
+        const awaiting = forSession.find((stream) => this.awaitingTaskIds.has(stream.taskId));
+        if (awaiting) {
+          return awaiting;
+        }
+        return this.streamsBySessionKey.get(params.sessionKey) ?? forSession[forSession.length - 1];
+      }
+      return this.streamsBySessionKey.get(params.sessionKey);
     }
-    // Last resort: single active stream (common for one concurrent A2A task).
+    // Last resort: single active A2A stream in the process.
     if (this.streamsByRunId.size === 1) {
       return this.streamsByRunId.values().next().value;
     }
@@ -170,10 +205,13 @@ export class ToolApprovalBridge {
     const callId = (params.toolCallId || "").trim() || randomUUID();
     const approvalId = randomUUID();
 
-    // No active A2A stream (e.g. local chat without A2A) — do not block.
+    // No active A2A stream (e.g. local OpenClaw chat without A2A) — do not block.
     if (!stream) {
       return "allow-once";
     }
+
+    // Learn OpenClaw runId → A2A stream for subsequent tool calls in this turn.
+    this.aliasRunId(params.runId, stream.runId);
 
     this.awaitingTaskIds.add(stream.taskId);
 

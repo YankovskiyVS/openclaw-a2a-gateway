@@ -113,8 +113,10 @@ function handleGatewayAgentEvent(
   stream: GatewayStreamContext,
 ): void {
   const runId = asString(payload.runId);
+  // OpenClaw emits its own run ids (chatcmpl_*), while A2A registers idempotencyKey.
+  // This handler is bound to one agent() RPC connection — do not drop events.
   if (runId && runId !== stream.runId) {
-    return;
+    toolApprovalBridge.aliasRunId(runId, stream.runId);
   }
 
   const streamKind = asString(payload.stream);

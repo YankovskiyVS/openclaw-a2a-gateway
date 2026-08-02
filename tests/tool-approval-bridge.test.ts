@@ -138,7 +138,7 @@ describe("ToolApprovalBridge", () => {
     bridge.unregisterStream("run-4");
   });
 
-  it("does not route HITL to an ambiguous concurrent session stream", async () => {
+  it("routes HITL via session when OpenClaw runId differs (prefers latest stream)", async () => {
     const bridge = new ToolApprovalBridge();
     const busA = mockEventBus();
     const busB = mockEventBus();
@@ -158,8 +158,7 @@ describe("ToolApprovalBridge", () => {
       sessionKey,
     });
 
-    // OpenClaw runId does not match either A2A stream id → refuse wrong-bus routing.
-    const decision = await bridge.requestApproval({
+    const wait = bridge.requestApproval({
       toolName: "exec",
       params: { command: "ls" },
       toolCallId: "call-ambiguous",
@@ -167,9 +166,26 @@ describe("ToolApprovalBridge", () => {
       sessionKey,
       timeoutMs: 5_000,
     });
-    assert.equal(decision, "allow-once");
+
+    // Latest session stream (B) must receive pending_approval — never silent allow-once.
+    assert.ok(busB.events.length >= 2, `expected HITL events on latest stream, got ${busB.events.length}`);
     assert.equal(busA.events.length, 0);
-    assert.equal(busB.events.length, 0);
+
+    assert.equal(bridge.resolve("x", "allow-once", "call-ambiguous"), true);
+    assert.equal(await wait, "allow-once");
+
+    // Alias learned — next call with same OpenClaw runId hits stream B directly.
+    const wait2 = bridge.requestApproval({
+      toolName: "exec",
+      params: { command: "pwd" },
+      toolCallId: "call-aliased",
+      runId: "openclaw-other-id",
+      sessionKey: "other-session-ignored-when-aliased",
+      timeoutMs: 5_000,
+    });
+    assert.ok(busB.events.length >= 4);
+    assert.equal(bridge.resolve("y", "deny", "call-aliased"), true);
+    assert.equal(await wait2, "deny");
 
     bridge.unregisterStream("a2a-run-a");
     bridge.unregisterStream("a2a-run-b");
