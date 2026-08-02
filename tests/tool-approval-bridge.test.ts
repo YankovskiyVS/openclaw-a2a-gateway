@@ -191,4 +191,39 @@ describe("ToolApprovalBridge", () => {
     assert.deepEqual(await Promise.all([first, second]), ["allow-once", "allow-once"]);
     bridge.unregisterStream("run-6");
   });
+
+  it("allow-always still publishes running on the A2A bus", async () => {
+    const bridge = new ToolApprovalBridge();
+    const bus = mockEventBus();
+    const sessionKey = "agent:main:a2a:ctx-7";
+    bridge.registerStream({
+      eventBus: bus as never,
+      taskId: "task-7",
+      contextId: "ctx-7",
+      runId: "run-7",
+      sessionKey,
+    });
+
+    const first = bridge.requestApproval({
+      toolName: "write",
+      params: { path: "a" },
+      toolCallId: "call-7a",
+      sessionKey,
+      timeoutMs: 5_000,
+    });
+    bridge.resolve("x", "allow-always", "call-7a");
+    assert.equal(await first, "allow-always");
+    bus.events.length = 0;
+
+    const second = await bridge.requestApproval({
+      toolName: "write",
+      params: { path: "b" },
+      toolCallId: "call-7b",
+      sessionKey,
+      timeoutMs: 5_000,
+    });
+    assert.equal(second, "allow-always");
+    assert.ok(bus.events.length >= 1, "expected running artifact for allow-always shortcut");
+    bridge.unregisterStream("run-7");
+  });
 });

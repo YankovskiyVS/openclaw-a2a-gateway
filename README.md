@@ -551,7 +551,7 @@ Aliases: `metadata.abort`, `metadata.stop` (boolean or object). The gateway look
 | `observability.metricsAuth` | string | `none` | `none` or `bearer` for metrics endpoint |
 | `observability.auditLogPath` | string | `~/.openclaw/a2a-audit.jsonl` | Path for JSONL audit log |
 | `timeouts.agentResponseTimeoutMs` | number | `300000` | Max wait for agent response (ms) |
-| `limits.maxConcurrentTasks` | number | `4` | Max active inbound agent runs **per A2A session** (`contextId`). Different sessions run in parallel. |
+| `limits.maxConcurrentTasks` | number | `1` | Max active inbound agent runs **per A2A session** (`contextId`). Keep `1` for reliable tool-approval HITL. Different sessions still run in parallel. |
 | `limits.maxQueuedTasks` | number | `100` | Max queued tasks **per A2A session** before rejection |
 
 ## Endpoints

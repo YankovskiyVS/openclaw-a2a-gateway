@@ -201,9 +201,9 @@
         "properties": {
           "maxConcurrentTasks": {
             "type": "number",
-            "default": 4,
+            "default": 1,
             "minimum": 1,
-            "description": "Max concurrent agent runs per A2A session (contextId). Different sessions run in parallel."
+            "description": "Max concurrent agent runs per A2A session (contextId). Keep at 1 for reliable tool-approval HITL; different sessions still run in parallel."
           },
           "maxQueuedTasks": {
             "type": "number",

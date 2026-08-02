@@ -349,7 +349,10 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
       } : {}),
     },
     limits: {
-      maxConcurrentTasks: Math.max(1, Math.floor(asNumber(limits.maxConcurrentTasks, 4))),
+      // Default 1: parallel agent turns on the same contextId split the HITL
+      // bridge (streamsBySessionKey last-writer-wins) so approve/running events
+      // land on the wrong A2A bus. Re-enable >1 only with hardened routing.
+      maxConcurrentTasks: Math.max(1, Math.floor(asNumber(limits.maxConcurrentTasks, 1))),
       maxQueuedTasks: Math.max(0, Math.floor(asNumber(limits.maxQueuedTasks, 100))),
       ...(limits.saturation != null ? {
         saturation: parseSaturationConfig(asObject(limits.saturation)) ?? undefined,

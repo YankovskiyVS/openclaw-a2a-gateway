@@ -264,11 +264,16 @@ export class ToolApprovalBridge {
     if (!this.shouldRequireApproval(params.toolName, params.tools)) {
       return "allow-once";
     }
+
+    const callId = (params.toolCallId || "").trim() || randomUUID();
+
+    // allow-always: still publish running on the live A2A bus so BFF/UI see the tool.
+    // Skipping publish left clients stuck on the previous pending/empty state.
     if (this.isAlwaysAllowed(params.sessionKey, params.toolName)) {
+      this.publishAutoAllowed(params, callId);
       return "allow-always";
     }
 
-    const callId = (params.toolCallId || "").trim() || randomUUID();
     const existing = this.inFlightByCallId.get(callId);
     if (existing) {
       // Duplicate before_tool_call (double plugin load) — share the same wait.
@@ -282,6 +287,33 @@ export class ToolApprovalBridge {
     } finally {
       this.inFlightByCallId.delete(callId);
     }
+  }
+
+  private publishAutoAllowed(params: RequestApprovalParams, callId: string): void {
+    const stream = this.findStream({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+    });
+    if (!stream) {
+      return;
+    }
+    this.aliasRunId(params.runId, stream.runId);
+    const approvalId = randomUUID();
+    publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, {
+      kind: "tool",
+      callId,
+      name: params.toolName,
+      phase: "start",
+      status: "running",
+      approvalId,
+      input: params.params,
+    });
+    publishStatusUpdate(
+      stream.eventBus,
+      stream.taskId,
+      stream.contextId,
+      TaskState.TASK_STATE_WORKING,
+    );
   }
 
   private async requestApprovalOnce(
