@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ToolApprovalBridge } from "../src/tool-approval-bridge.js";
+import { ToolApprovalBridge, toolApprovalBridge } from "../src/tool-approval-bridge.js";
 
 function mockEventBus() {
   const events: unknown[] = [];
@@ -189,5 +189,49 @@ describe("ToolApprovalBridge", () => {
 
     bridge.unregisterStream("a2a-run-a");
     bridge.unregisterStream("a2a-run-b");
+  });
+
+  it("never silent-allows when any A2A stream is active even if keys mismatch", async () => {
+    const bridge = new ToolApprovalBridge();
+    const bus = mockEventBus();
+    bridge.registerStream({
+      eventBus: bus as never,
+      taskId: "task-live",
+      contextId: "ctx-live",
+      runId: "a2a-live",
+      sessionKey: "agent:main:a2a:ctx-live",
+    });
+
+    const wait = bridge.requestApproval({
+      toolName: "write",
+      params: { path: "/tmp/x" },
+      toolCallId: "call-mismatch",
+      runId: "totally-unknown",
+      sessionKey: "totally-unknown-session",
+      timeoutMs: 5_000,
+    });
+
+    assert.ok(bus.events.length >= 2, "must publish pending_approval, not allow-once");
+    assert.equal(bridge.resolve("z", "allow-once", "call-mismatch"), true);
+    assert.equal(await wait, "allow-once");
+    bridge.unregisterStream("a2a-live");
+  });
+
+  it("process bridge is shared across getProcessBridge-style access", () => {
+    // Simulate double module load: both exports must see the same registry.
+    const a = toolApprovalBridge;
+    const b = toolApprovalBridge;
+    assert.equal(a, b);
+    const bus = mockEventBus();
+    a.registerStream({
+      eventBus: bus as never,
+      taskId: "task-shared",
+      contextId: "ctx",
+      runId: "run-shared",
+      sessionKey: "agent:main:a2a:ctx",
+    });
+    assert.equal(b.activeStreamCount(), 1);
+    b.unregisterStream("run-shared");
+    assert.equal(a.activeStreamCount(), 0);
   });
 });
