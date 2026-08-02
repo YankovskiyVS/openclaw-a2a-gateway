@@ -137,4 +137,58 @@ describe("ToolApprovalBridge", () => {
     assert.equal(decision, "timeout");
     bridge.unregisterStream("run-4");
   });
+
+  it("finds stream when OpenClaw sessionKey has session: prefix and foreign runId", async () => {
+    const bridge = new ToolApprovalBridge();
+    const bus = mockEventBus();
+    bridge.registerStream({
+      eventBus: bus as never,
+      taskId: "task-5",
+      contextId: "ctx-5",
+      runId: "a2a-run-5",
+      sessionKey: "agent:main:a2a:ctx-5",
+    });
+
+    const wait = bridge.requestApproval({
+      toolName: "write",
+      params: { path: "x" },
+      toolCallId: "call-5",
+      runId: "chatcmpl_foreign",
+      sessionKey: "session:agent:main:a2a:ctx-5",
+      timeoutMs: 5_000,
+    });
+
+    assert.equal(bridge.isAwaitingApproval("task-5"), true);
+    assert.ok(bus.events.length >= 2, "expected pending_approval published to A2A bus");
+    bridge.resolve("x", "allow-once", "call-5");
+    assert.equal(await wait, "allow-once");
+    bridge.unregisterStream("a2a-run-5");
+  });
+
+  it("dedupes duplicate before_tool_call for the same callId", async () => {
+    const bridge = new ToolApprovalBridge();
+    const bus = mockEventBus();
+    bridge.registerStream({
+      eventBus: bus as never,
+      taskId: "task-6",
+      contextId: "ctx-6",
+      runId: "run-6",
+      sessionKey: "agent:main:a2a:ctx-6",
+    });
+
+    const params = {
+      toolName: "exec",
+      params: { command: "ls" },
+      toolCallId: "call-6",
+      sessionKey: "agent:main:a2a:ctx-6",
+      timeoutMs: 5_000,
+    } as const;
+    const first = bridge.requestApproval(params);
+    const second = bridge.requestApproval(params);
+    // Only one pending_approval artifact pair for the shared wait.
+    assert.equal(bus.events.length, 2);
+    bridge.resolve("x", "allow-once", "call-6");
+    assert.deepEqual(await Promise.all([first, second]), ["allow-once", "allow-once"]);
+    bridge.unregisterStream("run-6");
+  });
 });

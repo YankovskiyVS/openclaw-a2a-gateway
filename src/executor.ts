@@ -113,8 +113,10 @@ function handleGatewayAgentEvent(
   stream: GatewayStreamContext,
 ): void {
   const runId = asString(payload.runId);
+  // OpenClaw emits its own run ids (chatcmpl_*), while A2A registers idempotencyKey.
+  // This handler is bound to one agent() RPC connection — do not drop events.
   if (runId && runId !== stream.runId) {
-    return;
+    toolApprovalBridge.aliasRunId(runId, stream.runId);
   }
 
   const streamKind = asString(payload.stream);
@@ -1835,6 +1837,13 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const runId = uuidv4();
     const abortController = new AbortController();
     if (streamOptions) {
+      toolApprovalBridge.registerStream({
+        eventBus: streamOptions.eventBus,
+        taskId: streamOptions.taskId,
+        contextId: streamOptions.contextId,
+        runId,
+        sessionKey,
+      });
       activeRuns.register({
         taskId: streamOptions.taskId,
         contextId: streamOptions.contextId,
@@ -1873,36 +1882,42 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       ? AbortSignal.any([timeoutSignal, abortController.signal])
       : abortController.signal;
 
-    const response = await fetch(gatewayConfig.openAIChatCompletionsUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: combinedSignal,
-    });
-
-    if (!response.ok) {
-      const textBody = await response.text();
-      const bodyPreview = textBody.length > 500 ? `${textBody.slice(0, 500)}...` : textBody;
-      throw new Error(`OpenAI HTTP dispatch failed (${response.status}): ${bodyPreview}`);
-    }
-
-    if (useStream && streamOptions && response.body) {
-      return this.readOpenAIStreamResponse(response.body, streamOptions, abortController.signal);
-    }
-
-    const textBody = await response.text();
-    let parsed: unknown;
     try {
-      parsed = textBody ? JSON.parse(textBody) : {};
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`OpenAI HTTP dispatch invalid JSON response: ${message}`);
+      const response = await fetch(gatewayConfig.openAIChatCompletionsUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: combinedSignal,
+      });
+
+      if (!response.ok) {
+        const textBody = await response.text();
+        const bodyPreview = textBody.length > 500 ? `${textBody.slice(0, 500)}...` : textBody;
+        throw new Error(`OpenAI HTTP dispatch failed (${response.status}): ${bodyPreview}`);
+      }
+
+      if (useStream && streamOptions && response.body) {
+        return await this.readOpenAIStreamResponse(response.body, streamOptions, abortController.signal);
+      }
+
+      const textBody = await response.text();
+      let parsed: unknown;
+      try {
+        parsed = textBody ? JSON.parse(textBody) : {};
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`OpenAI HTTP dispatch invalid JSON response: ${message}`);
+      }
+      const responseText = extractOpenAIResponseText(parsed);
+      if (!responseText) {
+        throw new Error("OpenAI HTTP dispatch returned empty assistant response");
+      }
+      return { text: responseText, mediaUrls: [] };
+    } finally {
+      if (streamOptions) {
+        toolApprovalBridge.unregisterStream(runId);
+      }
     }
-    const responseText = extractOpenAIResponseText(parsed);
-    if (!responseText) {
-      throw new Error("OpenAI HTTP dispatch returned empty assistant response");
-    }
-    return { text: responseText, mediaUrls: [] };
   }
 
   private async readOpenAIStreamResponse(

@@ -4,6 +4,11 @@
  * OpenClaw 2026.3.2 `before_tool_call` only supports `{ block, params }` (no
  * `requireApproval`). We pause the agent turn by awaiting a Promise in the
  * hook; A2A clients resume via metadata.toolApproval on a follow-up message.
+ *
+ * IMPORTANT: the bridge MUST be a process-wide singleton (globalThis). OpenClaw
+ * can load the plugin module more than once; a module-local singleton then
+ * splits registerStream (executor) from before_tool_call (hook) → silent
+ * allow-once and missing HITL in the A2A UI.
  */
 import { randomUUID } from "node:crypto";
 
@@ -44,6 +49,8 @@ export type RequestApprovalParams = {
   tools?: string[];
 };
 
+const GLOBAL_BRIDGE_KEY = "__openclaw_a2a_tool_approval_bridge_v1__";
+
 function summarizeParams(params: Record<string, unknown>): string {
   try {
     const raw = JSON.stringify(params);
@@ -54,21 +61,67 @@ function summarizeParams(params: Record<string, unknown>): string {
   }
 }
 
+/** Normalize OpenClaw / A2A session key variants for Map lookup. */
+export function normalizeSessionKey(sessionKey: string | undefined): string | undefined {
+  const raw = (sessionKey || "").trim();
+  if (!raw) return undefined;
+  // OpenClaw lane keys sometimes look like "session:agent:main:a2a:<ctx>".
+  return raw.replace(/^session:/, "");
+}
+
+function sessionKeysLooselyMatch(left: string | undefined, right: string | undefined): boolean {
+  const a = normalizeSessionKey(left);
+  const b = normalizeSessionKey(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // agent:main:a2a:<ctx> vs agent:main:<ctx> vs bare <ctx>
+  return a.endsWith(b) || b.endsWith(a) || a.includes(b) || b.includes(a);
+}
+
 export class ToolApprovalBridge {
   private readonly streamsByRunId = new Map<string, ActiveApprovalStream>();
   private readonly streamsBySessionKey = new Map<string, ActiveApprovalStream>();
   private readonly streamsByTaskId = new Map<string, ActiveApprovalStream>();
+  private readonly streamsByContextId = new Map<string, ActiveApprovalStream>();
+  /** OpenClaw runId (chatcmpl_*) → A2A stream runId (idempotencyKey). */
+  private readonly runIdAliases = new Map<string, string>();
   private readonly pendingByApprovalId = new Map<string, PendingApproval>();
   private readonly pendingByCallId = new Map<string, PendingApproval>();
+  /** In-flight approval waits shared across duplicate before_tool_call hooks. */
+  private readonly inFlightByCallId = new Map<string, Promise<BridgeApprovalDecision>>();
   /** sessionKey → toolName → true after allow-always */
   private readonly alwaysAllowed = new Map<string, Set<string>>();
   private readonly awaitingTaskIds = new Set<string>();
 
+  /**
+   * Map OpenClaw-native runId onto an A2A stream so before_tool_call can find it.
+   * Safe no-op when ids are empty or already the stream's own runId.
+   */
+  aliasRunId(openClawRunId: string | undefined, a2aRunId: string | undefined): void {
+    const from = (openClawRunId || "").trim();
+    const to = (a2aRunId || "").trim();
+    if (!from || !to || from === to) {
+      return;
+    }
+    if (!this.streamsByRunId.has(to)) {
+      return;
+    }
+    this.runIdAliases.set(from, to);
+  }
+
   registerStream(stream: ActiveApprovalStream): void {
     this.streamsByRunId.set(stream.runId, stream);
     this.streamsByTaskId.set(stream.taskId, stream);
-    if (stream.sessionKey) {
-      this.streamsBySessionKey.set(stream.sessionKey, stream);
+    if (stream.contextId) {
+      this.streamsByContextId.set(stream.contextId, stream);
+    }
+    const sessionKey = normalizeSessionKey(stream.sessionKey);
+    if (sessionKey) {
+      this.streamsBySessionKey.set(sessionKey, stream);
+      // Also index the raw key if it differed (e.g. session: prefix).
+      if (stream.sessionKey && stream.sessionKey !== sessionKey) {
+        this.streamsBySessionKey.set(stream.sessionKey, stream);
+      }
     }
   }
 
@@ -77,10 +130,25 @@ export class ToolApprovalBridge {
     if (!stream) return;
     this.streamsByRunId.delete(runId);
     this.streamsByTaskId.delete(stream.taskId);
-    if (stream.sessionKey) {
-      const current = this.streamsBySessionKey.get(stream.sessionKey);
+    if (stream.contextId) {
+      const current = this.streamsByContextId.get(stream.contextId);
       if (current?.runId === runId) {
-        this.streamsBySessionKey.delete(stream.sessionKey);
+        this.streamsByContextId.delete(stream.contextId);
+      }
+    }
+    if (stream.sessionKey) {
+      const normalized = normalizeSessionKey(stream.sessionKey);
+      for (const key of [stream.sessionKey, normalized]) {
+        if (!key) continue;
+        const current = this.streamsBySessionKey.get(key);
+        if (current?.runId === runId) {
+          this.streamsBySessionKey.delete(key);
+        }
+      }
+    }
+    for (const [alias, target] of [...this.runIdAliases.entries()]) {
+      if (target === runId || alias === runId) {
+        this.runIdAliases.delete(alias);
       }
     }
     this.awaitingTaskIds.delete(stream.taskId);
@@ -107,38 +175,84 @@ export class ToolApprovalBridge {
     return this.pendingByCallId.has(callId);
   }
 
+  activeStreamCount(): number {
+    return this.streamsByRunId.size;
+  }
+
   shouldRequireApproval(toolName: string, tools?: string[]): boolean {
     if (!tools || tools.length === 0) return true;
     return tools.includes(toolName);
   }
 
   isAlwaysAllowed(sessionKey: string | undefined, toolName: string): boolean {
-    if (!sessionKey) return false;
-    return this.alwaysAllowed.get(sessionKey)?.has(toolName) === true;
+    const normalized = normalizeSessionKey(sessionKey);
+    if (normalized && this.alwaysAllowed.get(normalized)?.has(toolName) === true) {
+      return true;
+    }
+    if (sessionKey && this.alwaysAllowed.get(sessionKey)?.has(toolName) === true) {
+      return true;
+    }
+    for (const [key, set] of this.alwaysAllowed.entries()) {
+      if (sessionKeysLooselyMatch(key, sessionKey) && set.has(toolName)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   rememberAlwaysAllow(sessionKey: string | undefined, toolName: string): void {
-    if (!sessionKey) return;
-    let set = this.alwaysAllowed.get(sessionKey);
+    const key = normalizeSessionKey(sessionKey) || sessionKey;
+    if (!key) return;
+    let set = this.alwaysAllowed.get(key);
     if (!set) {
       set = new Set();
-      this.alwaysAllowed.set(sessionKey, set);
+      this.alwaysAllowed.set(key, set);
     }
     set.add(toolName);
   }
 
-  findStream(params: { runId?: string; sessionKey?: string }): ActiveApprovalStream | undefined {
+  findStream(params: { runId?: string; sessionKey?: string; contextId?: string }): ActiveApprovalStream | undefined {
     if (params.runId) {
       const byRun = this.streamsByRunId.get(params.runId);
       if (byRun) return byRun;
+      const aliased = this.runIdAliases.get(params.runId);
+      if (aliased) {
+        const byAlias = this.streamsByRunId.get(aliased);
+        if (byAlias) return byAlias;
+      }
     }
+
     if (params.sessionKey) {
-      return this.streamsBySessionKey.get(params.sessionKey);
+      const normalized = normalizeSessionKey(params.sessionKey);
+      const exact =
+        this.streamsBySessionKey.get(params.sessionKey) ||
+        (normalized ? this.streamsBySessionKey.get(normalized) : undefined);
+      if (exact) return exact;
+
+      const forSession = [...this.streamsByRunId.values()].filter((stream) =>
+        sessionKeysLooselyMatch(stream.sessionKey, params.sessionKey),
+      );
+      if (forSession.length === 1) {
+        return forSession[0];
+      }
+      if (forSession.length > 1) {
+        const awaiting = forSession.find((stream) => this.awaitingTaskIds.has(stream.taskId));
+        if (awaiting) return awaiting;
+        return forSession[forSession.length - 1];
+      }
+      // Miss on sessionKey must NOT early-return — fall through to context / size===1.
     }
-    // Last resort: single active stream (common for one concurrent A2A task).
+
+    if (params.contextId) {
+      const byCtx = this.streamsByContextId.get(params.contextId);
+      if (byCtx) return byCtx;
+    }
+
+    // Last resort: single active A2A stream in the process.
     if (this.streamsByRunId.size === 1) {
       return this.streamsByRunId.values().next().value;
     }
+
     return undefined;
   }
 
@@ -154,18 +268,40 @@ export class ToolApprovalBridge {
       return "allow-always";
     }
 
+    const callId = (params.toolCallId || "").trim() || randomUUID();
+    const existing = this.inFlightByCallId.get(callId);
+    if (existing) {
+      // Duplicate before_tool_call (double plugin load) — share the same wait.
+      return existing;
+    }
+
+    const wait = this.requestApprovalOnce(params, callId);
+    this.inFlightByCallId.set(callId, wait);
+    try {
+      return await wait;
+    } finally {
+      this.inFlightByCallId.delete(callId);
+    }
+  }
+
+  private async requestApprovalOnce(
+    params: RequestApprovalParams,
+    callId: string,
+  ): Promise<BridgeApprovalDecision> {
     const stream = this.findStream({
       runId: params.runId,
       sessionKey: params.sessionKey,
     });
 
-    const callId = (params.toolCallId || "").trim() || randomUUID();
     const approvalId = randomUUID();
 
-    // No active A2A stream (e.g. local chat without A2A) — do not block.
+    // No active A2A stream (e.g. local OpenClaw chat without A2A) — do not block.
     if (!stream) {
       return "allow-once";
     }
+
+    // Learn OpenClaw runId → A2A stream for subsequent tool calls in this turn.
+    this.aliasRunId(params.runId, stream.runId);
 
     this.awaitingTaskIds.add(stream.taskId);
 
@@ -295,5 +431,15 @@ export class ToolApprovalBridge {
   }
 }
 
-/** Process-wide bridge shared by plugin hook + A2A executor. */
-export const toolApprovalBridge = new ToolApprovalBridge();
+function getProcessBridge(): ToolApprovalBridge {
+  const g = globalThis as typeof globalThis & {
+    [GLOBAL_BRIDGE_KEY]?: ToolApprovalBridge;
+  };
+  if (!g[GLOBAL_BRIDGE_KEY]) {
+    g[GLOBAL_BRIDGE_KEY] = new ToolApprovalBridge();
+  }
+  return g[GLOBAL_BRIDGE_KEY];
+}
+
+/** Process-wide bridge shared by plugin hook + A2A executor (survives double module load). */
+export const toolApprovalBridge = getProcessBridge();
