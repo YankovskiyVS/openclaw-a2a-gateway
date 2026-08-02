@@ -489,6 +489,19 @@ Resume contract (same as BFF `SendToolApproval`): send an A2A message with empty
 
 `decision`: `allow-once` | `allow-always` | `deny`. Keep `timeouts.agentResponseTimeoutMs` greater than `toolApproval.timeoutMs`.
 
+### Interrupt / stop agent run
+
+Clients can stop an in-flight agent turn via:
+
+1. **A2A `tasks/cancel`** on the live `taskId` — aborts OpenClaw (`abortEmbeddedPiRun`) and publishes `TASK_STATE_CANCELED`.
+2. **Metadata signal** (same UX as toolApproval): empty-text message with
+
+```json
+{ "metadata": { "interrupt": { "reason": "user_stop" } } }
+```
+
+Aliases: `metadata.abort`, `metadata.stop` (boolean or object). The gateway looks up the active run by `contextId` / `sessionKey` / optional `taskId`/`runId`, aborts the agent, and finishes the live task as canceled.
+
 ### Routing
 
 | Path | Type | Default | Description |
@@ -538,8 +551,8 @@ Resume contract (same as BFF `SendToolApproval`): send an A2A message with empty
 | `observability.metricsAuth` | string | `none` | `none` or `bearer` for metrics endpoint |
 | `observability.auditLogPath` | string | `~/.openclaw/a2a-audit.jsonl` | Path for JSONL audit log |
 | `timeouts.agentResponseTimeoutMs` | number | `300000` | Max wait for agent response (ms) |
-| `limits.maxConcurrentTasks` | number | `4` | Max active inbound agent runs |
-| `limits.maxQueuedTasks` | number | `100` | Max queued tasks before rejection |
+| `limits.maxConcurrentTasks` | number | `4` | Max active inbound agent runs **per A2A session** (`contextId`). Different sessions run in parallel. |
+| `limits.maxQueuedTasks` | number | `100` | Max queued tasks **per A2A session** before rejection |
 
 ## Endpoints
 

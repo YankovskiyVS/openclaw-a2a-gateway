@@ -133,7 +133,15 @@ export class ToolApprovalBridge {
       if (byRun) return byRun;
     }
     if (params.sessionKey) {
-      return this.streamsBySessionKey.get(params.sessionKey);
+      const forSession = [...this.streamsByRunId.values()].filter(
+        (stream) => stream.sessionKey === params.sessionKey,
+      );
+      // Safe only when a single A2A turn owns the session; otherwise wrong-bus
+      // routing is worse than skipping HITL (caller returns allow-once).
+      if (forSession.length === 1) {
+        return forSession[0];
+      }
+      return undefined;
     }
     // Last resort: single active stream (common for one concurrent A2A task).
     if (this.streamsByRunId.size === 1) {

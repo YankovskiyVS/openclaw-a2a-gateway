@@ -126,9 +126,11 @@ export interface GatewayConfig {
     affinity?: import("./routing-rules.js").AffinityConfig;
   };
   limits: {
+    /** Max concurrent agent runs per A2A session (contextId). Sessions run in parallel. */
     maxConcurrentTasks: number;
+    /** Max queued tasks per A2A session before rejection. */
     maxQueuedTasks: number;
-    /** Bio-inspired Michaelis-Menten soft concurrency config. When set, adds progressive delay under load. */
+    /** Bio-inspired Michaelis-Menten soft concurrency config (per session). When set, adds progressive delay under load. */
     saturation?: import("./saturation-model.js").SaturationConfig;
   };
   observability: {

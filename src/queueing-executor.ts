@@ -18,11 +18,20 @@ import {
 } from "./a2a/helpers.js";
 import { GatewayTelemetry } from "./telemetry.js";
 import { computeSaturationDelay, type SaturationConfig } from "./saturation-model.js";
+import { isInterruptOnlyMessage } from "./interrupt.js";
+import { isToolApprovalOnlyMessage } from "./tool-approval.js";
 
 interface QueueingExecutorOptions {
+  /**
+   * Max concurrent tasks **per A2A session** (contextId).
+   * Different sessions run in parallel independently.
+   */
   maxConcurrentTasks: number;
+  /**
+   * Max queued tasks **per A2A session** before rejection.
+   */
   maxQueuedTasks: number;
-  /** Bio-inspired Michaelis-Menten soft concurrency config. */
+  /** Bio-inspired Michaelis-Menten soft concurrency config (applied per session). */
   saturation?: SaturationConfig;
 }
 
@@ -31,6 +40,14 @@ interface QueuedTaskEntry {
   eventBus: ExecutionEventBus;
   resolve: () => void;
   reject: (error: Error) => void;
+}
+
+interface SessionLane {
+  /** Session key = A2A contextId (chat / conversation). */
+  sessionKey: string;
+  queue: QueuedTaskEntry[];
+  /** Includes tasks already accepted to run (reserved before async work starts). */
+  activeTasks: number;
 }
 
 type TerminalTaskState = "completed" | "failed" | "canceled" | "rejected";
@@ -95,14 +112,29 @@ function resolveTerminalStatus(event: AgentExecutionEvent): TaskStatus | undefin
   return undefined;
 }
 
+function sessionKeyFromContext(requestContext: RequestContext): string {
+  const contextId = (requestContext.contextId || "").trim();
+  return contextId || "__default__";
+}
+
+/** Control-plane messages must not wait behind the agent turn they are meant to unblock/stop. */
+function isSessionQueueBypassMessage(requestContext: RequestContext): boolean {
+  return (
+    isInterruptOnlyMessage(requestContext.userMessage) ||
+    isToolApprovalOnlyMessage(requestContext.userMessage)
+  );
+}
+
 export class QueueingAgentExecutor implements AgentExecutor {
   private readonly delegate: AgentExecutor;
   private readonly telemetry: GatewayTelemetry;
   private readonly options: QueueingExecutorOptions;
   private readonly defaultAgentId: string;
-  private readonly queue: QueuedTaskEntry[] = [];
-  private readonly pendingByTaskId = new Map<string, QueuedTaskEntry>();
-  private activeTasks = 0;
+  /** Per-session lanes: queue + concurrency are scoped to A2A contextId. */
+  private readonly lanes = new Map<string, SessionLane>();
+  private readonly pendingByTaskId = new Map<string, { entry: QueuedTaskEntry; sessionKey: string }>();
+  /** Global active count (telemetry only; does not cross-block sessions). */
+  private globalActiveTasks = 0;
 
   constructor(delegate: AgentExecutor, telemetry: GatewayTelemetry, options: QueueingExecutorOptions, defaultAgentId = "main") {
     this.delegate = delegate;
@@ -111,11 +143,14 @@ export class QueueingAgentExecutor implements AgentExecutor {
     this.options = {
       maxConcurrentTasks: Math.max(1, options.maxConcurrentTasks),
       maxQueuedTasks: Math.max(0, options.maxQueuedTasks),
+      saturation: options.saturation,
     };
   }
 
   execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      const sessionKey = sessionKeyFromContext(requestContext);
+      const lane = this.getOrCreateLane(sessionKey);
       const entry: QueuedTaskEntry = {
         requestContext,
         eventBus,
@@ -123,26 +158,36 @@ export class QueueingAgentExecutor implements AgentExecutor {
         reject,
       };
 
-      this.pendingByTaskId.set(requestContext.taskId, entry);
+      this.pendingByTaskId.set(requestContext.taskId, { entry, sessionKey });
 
-      if (this.activeTasks < this.options.maxConcurrentTasks) {
-        void this.runEntry(entry);
+      // Interrupt / tool-approval ack must run immediately even if the session
+      // lane is full — otherwise cancel/HITL wait behind the turn they control.
+      if (isSessionQueueBypassMessage(requestContext)) {
+        void this.runEntry(lane, entry, { bypassConcurrency: true });
         return;
       }
 
-      if (this.queue.length >= this.options.maxQueuedTasks) {
+      if (lane.activeTasks < this.options.maxConcurrentTasks) {
+        // Reserve the slot synchronously to avoid a race where two execute()
+        // calls both see activeTasks < max before either increments.
+        lane.activeTasks += 1;
+        void this.runEntry(lane, entry, { reserved: true });
+        return;
+      }
+
+      if (lane.queue.length >= this.options.maxQueuedTasks) {
         this.pendingByTaskId.delete(requestContext.taskId);
         this.telemetry.recordQueueRejected(
           requestContext.taskId,
           requestContext.contextId,
-          this.queue.length,
+          lane.queue.length,
         );
         eventBus.publish(
           taskEvent(
             requestContext.taskId,
             requestContext.contextId,
             TaskState.TASK_STATE_REJECTED,
-            "Gateway is overloaded; queue limit reached",
+            "Session queue limit reached",
           ),
         );
         eventBus.finished();
@@ -150,12 +195,12 @@ export class QueueingAgentExecutor implements AgentExecutor {
         return;
       }
 
-      this.queue.push(entry);
+      lane.queue.push(entry);
       this.telemetry.recordTaskQueued(
         requestContext.taskId,
         requestContext.contextId,
-        this.queue.length,
-        this.queue.length,
+        lane.queue.length,
+        this.totalQueued(),
       );
       requestContext.task = buildTask(
         requestContext.taskId,
@@ -164,7 +209,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
         {
           statusMessage: statusMessage(
             requestContext.contextId,
-            `Queued for execution (position ${this.queue.length})`,
+            `Queued for execution in session (position ${lane.queue.length})`,
             requestContext.taskId,
           ),
         },
@@ -176,54 +221,90 @@ export class QueueingAgentExecutor implements AgentExecutor {
   }
 
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
-    const queuedIndex = this.queue.findIndex((entry) => entry.requestContext.taskId === taskId);
-    if (queuedIndex !== -1) {
-      const [entry] = this.queue.splice(queuedIndex, 1);
-      if (entry) {
-        this.pendingByTaskId.delete(taskId);
-        publishStatusUpdate(
-          entry.eventBus,
-          taskId,
-          entry.requestContext.contextId,
-          TaskState.TASK_STATE_CANCELED,
-          {
-            statusMessage: statusMessage(
-              entry.requestContext.contextId,
-              "Task canceled while queued",
-              taskId,
-            ),
-          },
-        );
-        entry.eventBus.finished();
-        entry.resolve();
-        this.telemetry.recordTaskFinish(
-          taskId,
-          entry.requestContext.contextId,
-          "canceled",
-          0,
-          this.activeTasks,
-          this.queue.length,
-        );
+    const pending = this.pendingByTaskId.get(taskId);
+    if (pending) {
+      const lane = this.lanes.get(pending.sessionKey);
+      const queuedIndex = lane?.queue.findIndex((entry) => entry.requestContext.taskId === taskId) ?? -1;
+      if (lane && queuedIndex !== -1) {
+        const [entry] = lane.queue.splice(queuedIndex, 1);
+        if (entry) {
+          this.pendingByTaskId.delete(taskId);
+          publishStatusUpdate(
+            entry.eventBus,
+            taskId,
+            entry.requestContext.contextId,
+            TaskState.TASK_STATE_CANCELED,
+            {
+              statusMessage: statusMessage(
+                entry.requestContext.contextId,
+                "Task canceled while queued",
+                taskId,
+              ),
+            },
+          );
+          entry.eventBus.finished();
+          entry.resolve();
+          this.telemetry.recordTaskFinish(
+            taskId,
+            entry.requestContext.contextId,
+            "canceled",
+            0,
+            this.globalActiveTasks,
+            this.totalQueued(),
+          );
+          this.maybeDropLane(lane);
+        }
+        return;
       }
-      return;
     }
 
     await this.delegate.cancelTask(taskId, eventBus);
   }
 
-  private async runEntry(entry: QueuedTaskEntry): Promise<void> {
+  private getOrCreateLane(sessionKey: string): SessionLane {
+    let lane = this.lanes.get(sessionKey);
+    if (!lane) {
+      lane = { sessionKey, queue: [], activeTasks: 0 };
+      this.lanes.set(sessionKey, lane);
+    }
+    return lane;
+  }
+
+  private maybeDropLane(lane: SessionLane): void {
+    if (lane.activeTasks === 0 && lane.queue.length === 0) {
+      this.lanes.delete(lane.sessionKey);
+    }
+  }
+
+  private totalQueued(): number {
+    let total = 0;
+    for (const sessionLane of this.lanes.values()) {
+      total += sessionLane.queue.length;
+    }
+    return total;
+  }
+
+  private async runEntry(
+    lane: SessionLane,
+    entry: QueuedTaskEntry,
+    opts: { reserved?: boolean; bypassConcurrency?: boolean } = {},
+  ): Promise<void> {
     const { requestContext } = entry;
     const startedAt = Date.now();
     let finalState: TerminalTaskState | undefined;
     let finalErrorMessage: string | undefined;
+    const countsTowardLimit = !opts.bypassConcurrency;
 
-    this.queueDelete(requestContext.taskId);
+    this.queueDelete(lane, requestContext.taskId);
 
-    // Bio-inspired Michaelis-Menten soft concurrency: add progressive delay
-    // under load instead of hard rejection (enzyme kinetics analogy).
-    if (this.options.saturation) {
+    if (countsTowardLimit && !opts.reserved) {
+      lane.activeTasks += 1;
+    }
+
+    // Soft concurrency delay based on this session's load (after reservation).
+    if (countsTowardLimit && this.options.saturation) {
       const delayMs = computeSaturationDelay(
-        this.activeTasks,
+        Math.max(0, lane.activeTasks - 1),
         this.options.maxConcurrentTasks,
         this.options.saturation,
       );
@@ -232,13 +313,13 @@ export class QueueingAgentExecutor implements AgentExecutor {
       }
     }
 
-    this.activeTasks += 1;
+    this.globalActiveTasks += 1;
     this.telemetry.recordTaskStart(
       requestContext.taskId,
       requestContext.contextId,
       this.pickAgentId(requestContext),
-      this.activeTasks,
-      this.queue.length,
+      this.globalActiveTasks,
+      this.totalQueued(),
     );
 
     const observedBus = createObservedEventBus(entry.eventBus, (event) => {
@@ -267,15 +348,18 @@ export class QueueingAgentExecutor implements AgentExecutor {
       return;
     } finally {
       this.pendingByTaskId.delete(requestContext.taskId);
-      this.activeTasks = Math.max(0, this.activeTasks - 1);
+      if (countsTowardLimit) {
+        lane.activeTasks = Math.max(0, lane.activeTasks - 1);
+      }
+      this.globalActiveTasks = Math.max(0, this.globalActiveTasks - 1);
 
       this.telemetry.recordTaskFinish(
         requestContext.taskId,
         requestContext.contextId,
         finalState || "failed",
         Date.now() - startedAt,
-        this.activeTasks,
-        this.queue.length,
+        this.globalActiveTasks,
+        this.totalQueued(),
         finalErrorMessage,
       );
 
@@ -287,24 +371,27 @@ export class QueueingAgentExecutor implements AgentExecutor {
         // already finished — safe to ignore
       }
 
-      this.drainQueue();
+      this.drainLane(lane);
+      this.maybeDropLane(lane);
     }
   }
 
-  private drainQueue(): void {
-    while (this.activeTasks < this.options.maxConcurrentTasks && this.queue.length > 0) {
-      const next = this.queue.shift();
+  private drainLane(lane: SessionLane): void {
+    while (lane.activeTasks < this.options.maxConcurrentTasks && lane.queue.length > 0) {
+      const next = lane.queue.shift();
       if (!next) {
         break;
       }
-      void this.runEntry(next);
+      // Reserve before spawning async work so the while-condition stays correct.
+      lane.activeTasks += 1;
+      void this.runEntry(lane, next, { reserved: true });
     }
   }
 
-  private queueDelete(taskId: string): void {
-    const index = this.queue.findIndex((entry) => entry.requestContext.taskId === taskId);
+  private queueDelete(lane: SessionLane, taskId: string): void {
+    const index = lane.queue.findIndex((entry) => entry.requestContext.taskId === taskId);
     if (index !== -1) {
-      this.queue.splice(index, 1);
+      lane.queue.splice(index, 1);
     }
   }
 

@@ -13,7 +13,7 @@ import { QueueingAgentExecutor } from "../src/queueing-executor.js";
 import { FileTaskStore } from "../src/task-store.js";
 import { GatewayTelemetry } from "../src/telemetry.js";
 
-import { executionTaskState, partTextFromJson, silentLogger, TaskState } from "./helpers.js";
+import { executionTaskState, partTextFromJson, silentLogger } from "./helpers.js";
 
 function createDeferred() {
   let resolve!: () => void;
@@ -55,10 +55,10 @@ function createEventBus() {
   };
 }
 
-function makeTask(taskId: string): Task {
+function makeTask(taskId: string, contextId = `ctx-${taskId}`): Task {
   return {
     id: taskId,
-    contextId: `ctx-${taskId}`,
+    contextId,
     status: {
       state: TaskState.TASK_STATE_COMPLETED,
       timestamp: new Date().toISOString(),
@@ -79,15 +79,15 @@ function makeTask(taskId: string): Task {
   };
 }
 
-function makeRequestContext(taskId: string) {
+function makeRequestContext(taskId: string, contextId = `ctx-${taskId}`) {
   return {
     taskId,
-    contextId: `ctx-${taskId}`,
+    contextId,
     userMessage: {
       messageId: `msg-${taskId}`,
       role: Role.ROLE_USER,
       parts: [{ content: { $case: "text", value: `hello-${taskId}` }, metadata: undefined, filename: "", mediaType: "" }],
-      contextId: `ctx-${taskId}`,
+      contextId,
       taskId,
       metadata: undefined,
       extensions: [],
@@ -115,7 +115,7 @@ describe("P0 runtime components", () => {
     }
   });
 
-  it("QueueingAgentExecutor queues overflow safely and tracks metrics", async () => {
+  it("QueueingAgentExecutor queues overflow within the same session", async () => {
     const telemetry = new GatewayTelemetry(silentLogger(), { structuredLogs: false });
 
     const gates = new Map<string, ReturnType<typeof createDeferred>>();
@@ -141,10 +141,11 @@ describe("P0 runtime components", () => {
     const bus1 = createEventBus();
     const bus2 = createEventBus();
     const bus3 = createEventBus();
+    const sameSession = "ctx-shared";
 
-    const p1 = executor.execute(makeRequestContext("task-1"), bus1.bus);
-    const p2 = executor.execute(makeRequestContext("task-2"), bus2.bus);
-    const p3 = executor.execute(makeRequestContext("task-3"), bus3.bus);
+    const p1 = executor.execute(makeRequestContext("task-1", sameSession), bus1.bus);
+    const p2 = executor.execute(makeRequestContext("task-2", sameSession), bus2.bus);
+    const p3 = executor.execute(makeRequestContext("task-3", sameSession), bus3.bus);
 
     await Promise.resolve();
 
@@ -169,5 +170,102 @@ describe("P0 runtime components", () => {
     assert.equal(snapshot.tasks.queue_rejections, 1);
     assert.equal(snapshot.tasks.rejected, 1);
     assert.equal(snapshot.tasks.queued, 1);
+  });
+
+  it("QueueingAgentExecutor runs different sessions in parallel", async () => {
+    const telemetry = new GatewayTelemetry(silentLogger(), { structuredLogs: false });
+    const started: string[] = [];
+    const gates = new Map<string, ReturnType<typeof createDeferred>>();
+    gates.set("task-a", createDeferred());
+    gates.set("task-b", createDeferred());
+
+    const delegate: AgentExecutor = {
+      async execute(requestContext, eventBus) {
+        started.push(requestContext.taskId);
+        await gates.get(requestContext.taskId)?.promise;
+        eventBus.publish(AgentEvent.task(makeTask(requestContext.taskId)));
+        eventBus.finished();
+      },
+      async cancelTask(_taskId, eventBus) {
+        eventBus.finished();
+      },
+    };
+
+    const executor = new QueueingAgentExecutor(delegate, telemetry, {
+      maxConcurrentTasks: 1,
+      maxQueuedTasks: 0,
+    });
+
+    const busA = createEventBus();
+    const busB = createEventBus();
+
+    const pA = executor.execute(makeRequestContext("task-a", "ctx-a"), busA.bus);
+    const pB = executor.execute(makeRequestContext("task-b", "ctx-b"), busB.bus);
+
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Both sessions start immediately despite maxConcurrentTasks=1 (per-session).
+    assert.deepEqual(started.sort(), ["task-a", "task-b"]);
+
+    gates.get("task-a")?.resolve();
+    gates.get("task-b")?.resolve();
+    await Promise.all([pA, pB]);
+
+    const snapshot = telemetry.snapshot();
+    assert.equal(snapshot.tasks.started, 2);
+    assert.equal(snapshot.tasks.completed, 2);
+    assert.equal(snapshot.tasks.queue_rejections, 0);
+  });
+
+  it("QueueingAgentExecutor bypasses concurrency for interrupt-only messages", async () => {
+    const telemetry = new GatewayTelemetry(silentLogger(), { structuredLogs: false });
+    const started: string[] = [];
+    const gate = createDeferred();
+
+    const delegate: AgentExecutor = {
+      async execute(requestContext, eventBus) {
+        started.push(requestContext.taskId);
+        if (requestContext.taskId === "task-busy") {
+          await gate.promise;
+        }
+        eventBus.publish(AgentEvent.task(makeTask(requestContext.taskId)));
+        eventBus.finished();
+      },
+      async cancelTask(_taskId, eventBus) {
+        eventBus.finished();
+      },
+    };
+
+    const executor = new QueueingAgentExecutor(delegate, telemetry, {
+      maxConcurrentTasks: 1,
+      maxQueuedTasks: 0,
+    });
+
+    const busBusy = createEventBus();
+    const busInterrupt = createEventBus();
+    const session = "ctx-interrupt-bypass";
+
+    const pBusy = executor.execute(makeRequestContext("task-busy", session), busBusy.bus);
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(started, ["task-busy"]);
+
+    const interruptContext = makeRequestContext("task-interrupt", session);
+    interruptContext.userMessage = {
+      messageId: "msg-interrupt",
+      role: "ROLE_USER",
+      parts: [{ text: "" }],
+      metadata: { interrupt: { reason: "user_stop" } },
+    } as never;
+
+    const pInterrupt = executor.execute(interruptContext, busInterrupt.bus);
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.ok(started.includes("task-interrupt"), "interrupt must not wait behind busy turn");
+
+    gate.resolve();
+    await Promise.all([pBusy, pInterrupt]);
   });
 });

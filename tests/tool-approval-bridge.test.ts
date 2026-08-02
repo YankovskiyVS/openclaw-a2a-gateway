@@ -137,4 +137,41 @@ describe("ToolApprovalBridge", () => {
     assert.equal(decision, "timeout");
     bridge.unregisterStream("run-4");
   });
+
+  it("does not route HITL to an ambiguous concurrent session stream", async () => {
+    const bridge = new ToolApprovalBridge();
+    const busA = mockEventBus();
+    const busB = mockEventBus();
+    const sessionKey = "agent:default:a2a:ctx-shared";
+    bridge.registerStream({
+      eventBus: busA as never,
+      taskId: "task-a",
+      contextId: "ctx-shared",
+      runId: "a2a-run-a",
+      sessionKey,
+    });
+    bridge.registerStream({
+      eventBus: busB as never,
+      taskId: "task-b",
+      contextId: "ctx-shared",
+      runId: "a2a-run-b",
+      sessionKey,
+    });
+
+    // OpenClaw runId does not match either A2A stream id → refuse wrong-bus routing.
+    const decision = await bridge.requestApproval({
+      toolName: "exec",
+      params: { command: "ls" },
+      toolCallId: "call-ambiguous",
+      runId: "openclaw-other-id",
+      sessionKey,
+      timeoutMs: 5_000,
+    });
+    assert.equal(decision, "allow-once");
+    assert.equal(busA.events.length, 0);
+    assert.equal(busB.events.length, 0);
+
+    bridge.unregisterStream("a2a-run-a");
+    bridge.unregisterStream("a2a-run-b");
+  });
 });

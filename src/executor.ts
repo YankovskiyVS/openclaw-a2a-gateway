@@ -31,6 +31,13 @@ import {
   type ToolApprovalDecision,
 } from "./tool-approval.js";
 import { toolApprovalBridge } from "./tool-approval-bridge.js";
+import { extractInterruptSignal, isInterruptOnlyMessage } from "./interrupt.js";
+import {
+  abortOpenClawAgent,
+  activeRuns,
+  isAbortError,
+  RunCanceledError,
+} from "./active-runs.js";
 import {
   validateMimeType,
   validateUriSchemeAndIp,
@@ -1094,10 +1101,16 @@ class GatewayRpcConnection {
     params: unknown,
     timeoutMs: number,
     expectFinal: boolean,
+    abortSignal?: AbortSignal,
   ): Promise<unknown> {
     const socket = this.socket;
     if (!socket || socket.readyState !== 1) {
       throw new Error("gateway websocket is not connected");
+    }
+    if (abortSignal?.aborted) {
+      throw abortSignal.reason instanceof Error
+        ? abortSignal.reason
+        : new RunCanceledError("Agent run canceled");
     }
 
     const id = uuidv4();
@@ -1111,15 +1124,37 @@ class GatewayRpcConnection {
     return await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        abortSignal?.removeEventListener("abort", onAbort);
         reject(new Error(`gateway request timed out: ${method}`));
       }, timeoutMs);
+
+      const onAbort = () => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        abortSignal?.removeEventListener("abort", onAbort);
+        reject(
+          abortSignal?.reason instanceof Error
+            ? abortSignal.reason
+            : new RunCanceledError("Agent run canceled"),
+        );
+      };
+
+      if (abortSignal) {
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
 
       this.pending.set(id, {
         method,
         expectFinal,
         timer,
-        resolve,
-        reject,
+        resolve: (value) => {
+          abortSignal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        reject: (error) => {
+          abortSignal?.removeEventListener("abort", onAbort);
+          reject(error);
+        },
       });
 
       try {
@@ -1127,6 +1162,7 @@ class GatewayRpcConnection {
       } catch (error: unknown) {
         clearTimeout(timer);
         this.pending.delete(id);
+        abortSignal?.removeEventListener("abort", onAbort);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -1480,6 +1516,73 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       }
     }
 
+    const interruptSignal = extractInterruptSignal(requestContext.userMessage);
+    if (interruptSignal && isInterruptOnlyMessage(requestContext.userMessage)) {
+      const sessionKeyHint = `agent:${agentId}:a2a:${contextId}`;
+      // Prefer explicit task/run id; otherwise stop all active runs for this session.
+      const targets = activeRuns.findAll({
+        taskId: interruptSignal.taskId,
+        runId: interruptSignal.runId,
+        ...(interruptSignal.taskId || interruptSignal.runId
+          ? {}
+          : { contextId, sessionKey: sessionKeyHint }),
+      });
+      // Also try live taskId if client reused it.
+      if (targets.length === 0) {
+        const byLiveTask = activeRuns.getByTaskId(taskId);
+        if (byLiveTask) {
+          targets.push(byLiveTask);
+        }
+      }
+      // Stale/wrong taskId or runId must not silently no-op — fall back to session.
+      if (targets.length === 0) {
+        targets.push(...activeRuns.findAll({ sessionKey: sessionKeyHint }));
+      }
+      if (targets.length === 0) {
+        targets.push(...activeRuns.findAll({ contextId }));
+      }
+      if (targets.length > 0) {
+        const reason = interruptSignal.reason
+          ? `Stopped by user (${interruptSignal.reason})`
+          : "Stopped by user";
+        this.api.logger.info(
+          `a2a-gateway: interrupt signal for ${targets.length} run(s) context ${contextId}`,
+        );
+        let touchedLiveTask = false;
+        for (const target of targets) {
+          toolApprovalBridge.unregisterStream(target.runId);
+          await activeRuns.interrupt(target, reason, abortOpenClawAgent);
+          if (target.taskId === taskId) {
+            touchedLiveTask = true;
+          }
+        }
+        if (touchedLiveTask) {
+          return;
+        }
+      } else {
+        this.api.logger.info(
+          `a2a-gateway: interrupt with no active run for context ${contextId}`,
+        );
+      }
+      const ackMessage = agentMessage(contextId, [
+        textPart(targets.length > 0 ? "Interrupt recorded" : "No active run to interrupt"),
+      ], taskId);
+      if (this.isQueuedTask(requestContext)) {
+        publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
+          statusMessage: ackMessage,
+        });
+      } else {
+        publishTask(
+          eventBus,
+          buildTask(taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
+            statusMessage: ackMessage,
+          }),
+        );
+      }
+      eventBus.finished();
+      return;
+    }
+
     // Carry forward conversation history from previous rounds (if any).
     // The SDK's ResultManager replaces currentTask with { ...taskEvent }, so
     // omitting history would wipe out prior messages.
@@ -1554,6 +1657,10 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       if (toolApprovalBridge.isAwaitingApproval(taskId)) {
         return;
       }
+      const active = activeRuns.getByTaskId(taskId);
+      if (active?.canceled || active?.finished) {
+        return;
+      }
       publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
     }, STREAMING_HEARTBEAT_INTERVAL_MS);
 
@@ -1575,7 +1682,12 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         );
         streamedViaOpenAI = true;
       } else {
-        const gatewayStreamCtx = { eventBus, taskId, contextId };
+        const gatewayStreamCtx: {
+          eventBus: ExecutionEventBus;
+          taskId: string;
+          contextId: string;
+          streamedText?: boolean;
+        } = { eventBus, taskId, contextId };
         agentResponse = await this.dispatchViaGatewayRpc(
           agentId,
           requestContext.userMessage,
@@ -1587,9 +1699,22 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       }
     } catch (err: unknown) {
       clearInterval(heartbeat);
+      const active = activeRuns.getByTaskId(taskId);
+      if (active?.finished || isAbortError(err) || active?.canceled) {
+        this.api.logger.info(`a2a-gateway: agent run canceled for task ${taskId}`);
+        if (active && !active.finished) {
+          toolApprovalBridge.unregisterStream(active.runId);
+          await activeRuns.interrupt(active, "Stopped by user", abortOpenClawAgent);
+        }
+        activeRuns.unregister(taskId);
+        this.taskContextByTaskId.delete(taskId);
+        return;
+      }
       const errorMessage = err instanceof Error ? err.message : String(err);
       const truncatedError = errorMessage.length > 500 ? errorMessage.slice(0, 500) + "..." : errorMessage;
       this.api.logger.error(`a2a-gateway: agent dispatch failed: ${truncatedError}`);
+      activeRuns.unregister(taskId);
+      this.taskContextByTaskId.delete(taskId);
       await this.tryHooksWakeFallback(agentId, taskId, contextId, requestContext.userMessage);
 
       // Return failed task status so the caller knows dispatch did not succeed.
@@ -1605,6 +1730,20 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     }
 
     clearInterval(heartbeat);
+
+    // Cancel may have finished the live bus while dispatch was returning.
+    // Entry stays registered until we unregister here (interrupt does not drop it).
+    const activeAfter = activeRuns.getByTaskId(taskId);
+    if (activeAfter?.canceled || activeAfter?.finished) {
+      this.api.logger.info(
+        `a2a-gateway: skip COMPLETED after cancel for task ${taskId}`,
+      );
+      activeRuns.unregister(taskId);
+      this.taskContextByTaskId.delete(taskId);
+      return;
+    }
+    activeRuns.unregister(taskId);
+    this.taskContextByTaskId.delete(taskId);
 
     if (!streamedViaOpenAI && !streamedViaGateway && agentResponse.text) {
       publishTextArtifactChunk(eventBus, taskId, contextId, agentResponse.text, false, true);
@@ -1624,11 +1763,22 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     return requestContext.task?.status?.state === TaskState.TASK_STATE_SUBMITTED;
   }
 
-  // cancelTask intentionally omits history: it only receives taskId (no
-  // RequestContext), so loading history would require a TaskStore reference
-  // that the executor doesn't hold. Cancellation is a terminal state where
-  // consumers care about status, not conversation history.
+  // cancelTask aborts the live OpenClaw agent run (when active) and publishes
+  // TASK_STATE_CANCELED. History is omitted: cancel only receives taskId.
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
+    const active = activeRuns.getByTaskId(taskId);
+    if (active) {
+      this.api.logger.info(`a2a-gateway: cancelTask aborting active run ${taskId}`);
+      toolApprovalBridge.unregisterStream(active.runId);
+      await activeRuns.interrupt(active, "Stopped by user", abortOpenClawAgent);
+      // Do not unregister here: owning execute() must observe canceled/finished
+      // and skip COMPLETED. It unregisters on the way out.
+      this.taskContextByTaskId.delete(taskId);
+      // Live bus already finished; finish cancel bus without double-publishing.
+      eventBus.finished();
+      return;
+    }
+
     const contextId = this.taskContextByTaskId.get(taskId);
     if (!contextId) {
       this.api.logger.warn(
@@ -1643,6 +1793,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       taskId,
       contextId,
       TaskState.TASK_STATE_CANCELED,
+      {
+        statusMessage: agentMessage(contextId, [textPart("Stopped by user")], taskId),
+      },
     );
     this.taskContextByTaskId.delete(taskId);
     eventBus.finished();
@@ -1679,6 +1832,20 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       : `${OPENCLAW_MODEL_ID_PREFIX}${agentId}`;
     const targetModel = openclawModelId;
     const modelOverrideWithPrefix = withModelIdPrefix(modelOverride);
+    const runId = uuidv4();
+    const abortController = new AbortController();
+    if (streamOptions) {
+      activeRuns.register({
+        taskId: streamOptions.taskId,
+        contextId: streamOptions.contextId,
+        sessionKey,
+        runId,
+        eventBus: streamOptions.eventBus,
+        abortController,
+        canceled: false,
+        finished: false,
+      });
+    }
 
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -1701,11 +1868,16 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       messages: [{ role: "user", content: messageText }],
     };
 
+    const timeoutSignal = AbortSignal.timeout(this.openAIRequestTimeoutMs);
+    const combinedSignal = AbortSignal.any
+      ? AbortSignal.any([timeoutSignal, abortController.signal])
+      : abortController.signal;
+
     const response = await fetch(gatewayConfig.openAIChatCompletionsUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(this.openAIRequestTimeoutMs),
+      signal: combinedSignal,
     });
 
     if (!response.ok) {
@@ -1715,7 +1887,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     }
 
     if (useStream && streamOptions && response.body) {
-      return this.readOpenAIStreamResponse(response.body, streamOptions);
+      return this.readOpenAIStreamResponse(response.body, streamOptions, abortController.signal);
     }
 
     const textBody = await response.text();
@@ -1736,6 +1908,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
   private async readOpenAIStreamResponse(
     body: ReadableStream<Uint8Array>,
     streamOptions: OpenAIStreamOptions,
+    abortSignal?: AbortSignal,
   ): Promise<AgentResponse> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -1743,46 +1916,69 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     let fullText = "";
     let chunkIndex = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
+    const onAbort = () => {
+      void reader.cancel().catch(() => undefined);
+    };
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        onAbort();
+        throw new RunCanceledError("Stopped by user");
       }
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    }
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) {
-          continue;
+    try {
+      while (true) {
+        if (abortSignal?.aborted) {
+          throw new RunCanceledError("Stopped by user");
         }
-        const data = trimmed.slice(5).trim();
-        if (!data || data === "[DONE]") {
-          continue;
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
         }
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) {
+            continue;
+          }
+          const data = trimmed.slice(5).trim();
+          if (!data || data === "[DONE]") {
+            continue;
+          }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            continue;
+          }
+          const delta = extractOpenAIStreamDelta(parsed);
+          if (!delta) {
+            continue;
+          }
+          fullText += delta;
+          publishTextArtifactChunk(
+            streamOptions.eventBus,
+            streamOptions.taskId,
+            streamOptions.contextId,
+            delta,
+            chunkIndex > 0,
+          );
+          chunkIndex += 1;
         }
-        const delta = extractOpenAIStreamDelta(parsed);
-        if (!delta) {
-          continue;
-        }
-        fullText += delta;
-        publishTextArtifactChunk(
-          streamOptions.eventBus,
-          streamOptions.taskId,
-          streamOptions.contextId,
-          delta,
-          chunkIndex > 0,
-        );
-        chunkIndex += 1;
+      }
+    } finally {
+      if (abortSignal) {
+        abortSignal.removeEventListener("abort", onAbort);
       }
     }
 
+    if (abortSignal?.aborted) {
+      throw new RunCanceledError("Stopped by user");
+    }
     if (!fullText) {
       throw new Error("OpenAI HTTP stream returned empty assistant response");
     }
@@ -1800,6 +1996,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     const gatewayConfig = this.resolveGatewayRuntimeConfig();
     const runId = uuidv4();
     const sessionKey = `agent:${agentId}:a2a:${contextId}`;
+    const abortController = new AbortController();
     const gatewayStream: GatewayStreamContext | undefined = streamContext
       ? {
           eventBus: streamContext.eventBus,
@@ -1828,6 +2025,29 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         runId: gatewayStream.runId,
         sessionKey,
       });
+      activeRuns.register({
+        taskId: gatewayStream.taskId,
+        contextId: gatewayStream.contextId,
+        sessionKey,
+        runId: gatewayStream.runId,
+        eventBus: gatewayStream.eventBus,
+        abortController,
+        closeGateway: () => gateway.close(),
+        requestChatAbort: async () => {
+          try {
+            await gateway.request(
+              "chat.abort",
+              { sessionKey, runId: gatewayStream.runId },
+              GATEWAY_REQUEST_TIMEOUT_MS,
+              false,
+            );
+          } catch {
+            // chat.abort may not cover the agent RPC path; abortEmbeddedPiRun is primary.
+          }
+        },
+        canceled: false,
+        finished: false,
+      });
     }
 
     await gateway.connect();
@@ -1851,6 +2071,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         agentParams,
         this.agentResponseTimeoutMs,
         true,
+        abortController.signal,
       );
       const finalBody = asObject(finalPayload);
       const status = asString(finalBody?.status);
@@ -1871,6 +2092,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         { sessionKey, limit: 50 },
         GATEWAY_REQUEST_TIMEOUT_MS,
         false,
+        abortController.signal,
       );
       const historyText = extractLatestAssistantReply(historyPayload);
       if (historyText) {
