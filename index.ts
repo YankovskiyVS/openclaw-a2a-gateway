@@ -441,12 +441,7 @@ const plugin = {
     // Human-in-the-loop: pause agent turn in before_tool_call until A2A client
     // sends metadata.toolApproval. (OpenClaw 2026.3.2 has no requireApproval —
     // we await a Promise and return { block } on deny/timeout.)
-    // Guard against double register() (plugin reload / duplicate module entry).
-    const hookGuard = globalThis as typeof globalThis & {
-      __openclaw_a2a_tool_approval_hook_registered__?: boolean;
-    };
-    if (config.toolApproval.enabled && !hookGuard.__openclaw_a2a_tool_approval_hook_registered__) {
-      hookGuard.__openclaw_a2a_tool_approval_hook_registered__ = true;
+    if (config.toolApproval.enabled) {
       api.on(
         "before_tool_call",
         async (event, ctx) => {
@@ -458,7 +453,6 @@ const plugin = {
             return;
           }
 
-          const activeStreams = toolApprovalBridge.activeStreamCount();
           const decision = await toolApprovalBridge.requestApproval({
             toolName,
             params: (event.params ?? {}) as Record<string, unknown>,
@@ -482,23 +476,15 @@ const plugin = {
             };
           }
 
-          if (decision === "allow-once" && activeStreams === 0) {
-            api.logger.info(
-              `a2a-gateway: allowed tool ${toolName} decision=${decision} callId=${toolCallId ?? ""} (no A2A stream — local/OpenClaw UI)`,
-            );
-          } else {
-            api.logger.info(
-              `a2a-gateway: allowed tool ${toolName} decision=${decision} callId=${toolCallId ?? ""} runId=${runId ?? ""} sessionKey=${sessionKey ?? ""} streams=${activeStreams}`,
-            );
-          }
+          api.logger.info(
+            `a2a-gateway: allowed tool ${toolName} decision=${decision} callId=${toolCallId ?? ""}`,
+          );
         },
         { priority: 100 },
       );
       api.logger.info(
         `a2a-gateway: tool approval hook registered (tools=${config.toolApproval.tools?.join(",") || "*"}, timeoutMs=${config.toolApproval.timeoutMs ?? 120_000})`,
       );
-    } else if (config.toolApproval.enabled) {
-      api.logger.info("a2a-gateway: tool approval hook already registered — skipping duplicate");
     }
 
     // Peer resilience: health check + circuit breaker

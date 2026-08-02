@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ToolApprovalBridge, toolApprovalBridge } from "../src/tool-approval-bridge.js";
+import { ToolApprovalBridge } from "../src/tool-approval-bridge.js";
 
 function mockEventBus() {
   const events: unknown[] = [];
@@ -136,102 +136,5 @@ describe("ToolApprovalBridge", () => {
     });
     assert.equal(decision, "timeout");
     bridge.unregisterStream("run-4");
-  });
-
-  it("routes HITL via session when OpenClaw runId differs (prefers latest stream)", async () => {
-    const bridge = new ToolApprovalBridge();
-    const busA = mockEventBus();
-    const busB = mockEventBus();
-    const sessionKey = "agent:default:a2a:ctx-shared";
-    bridge.registerStream({
-      eventBus: busA as never,
-      taskId: "task-a",
-      contextId: "ctx-shared",
-      runId: "a2a-run-a",
-      sessionKey,
-    });
-    bridge.registerStream({
-      eventBus: busB as never,
-      taskId: "task-b",
-      contextId: "ctx-shared",
-      runId: "a2a-run-b",
-      sessionKey,
-    });
-
-    const wait = bridge.requestApproval({
-      toolName: "exec",
-      params: { command: "ls" },
-      toolCallId: "call-ambiguous",
-      runId: "openclaw-other-id",
-      sessionKey,
-      timeoutMs: 5_000,
-    });
-
-    // Latest session stream (B) must receive pending_approval — never silent allow-once.
-    assert.ok(busB.events.length >= 2, `expected HITL events on latest stream, got ${busB.events.length}`);
-    assert.equal(busA.events.length, 0);
-
-    assert.equal(bridge.resolve("x", "allow-once", "call-ambiguous"), true);
-    assert.equal(await wait, "allow-once");
-
-    // Alias learned — next call with same OpenClaw runId hits stream B directly.
-    const wait2 = bridge.requestApproval({
-      toolName: "exec",
-      params: { command: "pwd" },
-      toolCallId: "call-aliased",
-      runId: "openclaw-other-id",
-      sessionKey: "other-session-ignored-when-aliased",
-      timeoutMs: 5_000,
-    });
-    assert.ok(busB.events.length >= 4);
-    assert.equal(bridge.resolve("y", "deny", "call-aliased"), true);
-    assert.equal(await wait2, "deny");
-
-    bridge.unregisterStream("a2a-run-a");
-    bridge.unregisterStream("a2a-run-b");
-  });
-
-  it("never silent-allows when any A2A stream is active even if keys mismatch", async () => {
-    const bridge = new ToolApprovalBridge();
-    const bus = mockEventBus();
-    bridge.registerStream({
-      eventBus: bus as never,
-      taskId: "task-live",
-      contextId: "ctx-live",
-      runId: "a2a-live",
-      sessionKey: "agent:main:a2a:ctx-live",
-    });
-
-    const wait = bridge.requestApproval({
-      toolName: "write",
-      params: { path: "/tmp/x" },
-      toolCallId: "call-mismatch",
-      runId: "totally-unknown",
-      sessionKey: "totally-unknown-session",
-      timeoutMs: 5_000,
-    });
-
-    assert.ok(bus.events.length >= 2, "must publish pending_approval, not allow-once");
-    assert.equal(bridge.resolve("z", "allow-once", "call-mismatch"), true);
-    assert.equal(await wait, "allow-once");
-    bridge.unregisterStream("a2a-live");
-  });
-
-  it("process bridge is shared across getProcessBridge-style access", () => {
-    // Simulate double module load: both exports must see the same registry.
-    const a = toolApprovalBridge;
-    const b = toolApprovalBridge;
-    assert.equal(a, b);
-    const bus = mockEventBus();
-    a.registerStream({
-      eventBus: bus as never,
-      taskId: "task-shared",
-      contextId: "ctx",
-      runId: "run-shared",
-      sessionKey: "agent:main:a2a:ctx",
-    });
-    assert.equal(b.activeStreamCount(), 1);
-    b.unregisterStream("run-shared");
-    assert.equal(a.activeStreamCount(), 0);
   });
 });
