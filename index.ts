@@ -64,6 +64,7 @@ import {
   type SaturationConfig,
 } from "./src/saturation-model.js";
 import { toolApprovalBridge } from "./src/tool-approval-bridge.js";
+import { installStableTaskIds } from "./src/stable-task-id.js";
 
 /** Build a JSON-RPC error response. */
 function jsonRpcError(id: string | number | null, code: number, message: string) {
@@ -677,6 +678,10 @@ const plugin = {
       return UserBuilder.noAuthentication();
     };
 
+    // messageId → taskId so manager retries do not enqueue duplicate session tasks.
+    if (!installStableTaskIds(DefaultRequestHandler)) {
+      api.logger.warn("a2a-gateway: stable taskId patch skipped (SDK shape changed)");
+    }
     const requestHandler = new DefaultRequestHandler(agentCard, taskStore, executor);
 
     const app = express();
