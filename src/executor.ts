@@ -473,17 +473,23 @@ function formatFilePartAsText(
     localPaths?.get(rawName) ||
     (typeof asString(obj.localPath) === "string" ? asString(obj.localPath) : undefined);
 
+  const uri = asString(file.uri) || asString(obj.url) || asString(obj.uri);
+  const resolvedLocal =
+    localPath ||
+    (uri && localPaths?.get(uri) ? localPaths.get(uri) : undefined);
+
   // Prefer materialized workspace path for tools (pdf/zip/…).
-  // URI parts are downloaded into a2a-inbox before this runs.
-  if (localPath) {
+  // URI parts are downloaded into a2a-inbox before this runs — never tell the
+  // agent to re-fetch the (often short-lived) presigned S3 URL.
+  if (resolvedLocal) {
     return [
-      `[Attached: ${name} (${mimeType}) → ${localPath}]`,
-      `Use the absolute path above with tools (pdf, read, etc). Do not pass only the filename.`,
+      `[Attached: ${name} (${mimeType}) → ${resolvedLocal}]`,
+      `File is already on disk at the absolute path above.`,
+      `Use that path with tools (read, pdf, etc). Do NOT download or open any remote URL for this file.`,
     ].join("\n");
   }
 
   // URI-based file fallback (materialize failed / not yet downloaded)
-  const uri = asString(file.uri) || asString(obj.url);
   if (uri) {
     return `[Attached: ${name} (${mimeType}) → ${uri}]`;
   }
@@ -551,8 +557,16 @@ function extractTextFragments(value: unknown, localPaths?: Map<string, string>):
     const trimmed = partContent.value.trim();
     return trimmed ? [trimmed] : [];
   }
+  // a2a-js / a2a-go FileWithUri: { content: { $case: "url", value }, filename, mediaType }
+  // Must resolve via localPaths (materialized a2a-inbox path) — do not leak S3 URL to the agent.
   if (partContent?.$case === "url" && typeof partContent.value === "string") {
-    return [`[Attached: ${partContent.value}]`];
+    const description = formatFilePartAsText({
+      filename: obj.filename || obj.name,
+      mediaType: obj.mediaType || obj.mimeType,
+      url: partContent.value,
+      uri: partContent.value,
+    }, localPaths);
+    return description ? [description] : [];
   }
   // a2a-js SDK hydrates raw parts as { content: { $case: "raw", value: Buffer } }
   if (partContent?.$case === "raw") {
@@ -612,7 +626,11 @@ function extractTextFragments(value: unknown, localPaths?: Map<string, string>):
   return [];
 }
 
-function extractInboundMessageText(message: unknown, localPaths?: Map<string, string>): string {
+/** Exported for tests — builds the OpenClaw agent prompt from an A2A user message. */
+export function extractInboundMessageText(
+  message: unknown,
+  localPaths?: Map<string, string>,
+): string {
   const fragments = extractTextFragments(message, localPaths);
   if (fragments.length > 0) {
     return fragments.join("\n");

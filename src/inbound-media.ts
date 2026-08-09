@@ -391,13 +391,16 @@ export async function materializeInboundFiles(
   return materialized;
 }
 
-/** Map original filename → absolute local path (last write wins on duplicates). */
+/** Map filename / source URI → absolute local path (last write wins on duplicates). */
 export function localPathIndex(files: MaterializedInboundFile[]): Map<string, string> {
   const map = new Map<string, string>();
   for (const file of files) {
     map.set(file.name, file.localPath);
     map.set(path.basename(file.name), file.localPath);
     map.set(sanitizeFileName(file.name), file.localPath);
+    if (file.sourceUri) {
+      map.set(file.sourceUri, file.localPath);
+    }
   }
   return map;
 }

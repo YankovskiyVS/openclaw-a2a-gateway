@@ -138,6 +138,13 @@ describe("inbound-media materialize", () => {
       assert.equal(files[0].sourceUri?.startsWith("https://s3.cloud.ru/"), true);
       assert.equal(fs.readFileSync(files[0].localPath).toString(), body.toString());
       assert.equal(localPathIndex(files).get("report.pdf"), files[0].localPath);
+      assert.equal(
+        localPathIndex(files).get(
+          "https://s3.cloud.ru/bucket/agent-space/p/u/report.pdf?X-Amz-Signature=abc",
+        ),
+        files[0].localPath,
+        "index must resolve by sourceUri so prompt formatting can hide S3 URL",
+      );
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

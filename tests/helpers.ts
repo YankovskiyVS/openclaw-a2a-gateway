@@ -46,6 +46,28 @@ export function silentLogger() {
 }
 
 export function makeConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const { security: securityOverrides, ...rest } = overrides;
+  const baseSecurity = {
+    inboundAuth: "none",
+    allowedMimeTypes: [
+      "image/*",
+      "application/pdf",
+      "text/plain",
+      "text/csv",
+      "application/json",
+      "application/zip",
+      "application/x-zip-compressed",
+      "application/gzip",
+      "application/x-tar",
+      "application/x-7z-compressed",
+      "audio/*",
+      "video/*",
+    ],
+    maxFileSizeBytes: 52_428_800,
+    maxInlineFileSizeBytes: 10_485_760,
+    fileUriAllowlist: [] as string[],
+    inboundMediaDir: path.join(os.tmpdir(), "a2a-inbox-test"),
+  };
   return {
     agentCard: {
       name: "Test Agent",
@@ -59,30 +81,15 @@ export function makeConfig(overrides: Record<string, unknown> = {}): Record<stri
     },
     peers: [],
     security: {
-      inboundAuth: "none",
-      allowedMimeTypes: [
-        "image/*",
-        "application/pdf",
-        "text/plain",
-        "text/csv",
-        "application/json",
-        "application/zip",
-        "application/x-zip-compressed",
-        "application/gzip",
-        "application/x-tar",
-        "application/x-7z-compressed",
-        "audio/*",
-        "video/*",
-      ],
-      maxFileSizeBytes: 52_428_800,
-      maxInlineFileSizeBytes: 10_485_760,
-      fileUriAllowlist: [],
-      inboundMediaDir: path.join(os.tmpdir(), "a2a-inbox-test"),
+      ...baseSecurity,
+      ...(securityOverrides && typeof securityOverrides === "object"
+        ? (securityOverrides as Record<string, unknown>)
+        : {}),
     },
     routing: {
       defaultAgentId: "default-agent",
     },
-    ...overrides,
+    ...rest,
   };
 }
 
