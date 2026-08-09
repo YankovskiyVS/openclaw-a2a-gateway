@@ -249,24 +249,12 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
 
   const inboundAuth = asString(security.inboundAuth, "none") as InboundAuth;
 
-  const defaultMimeTypes = [
-    "image/*",
-    "application/pdf",
-    "text/plain",
-    "text/csv",
-    "application/json",
-    "application/zip",
-    "application/x-zip-compressed",
-    "application/gzip",
-    "application/x-tar",
-    "application/x-7z-compressed",
-    "audio/*",
-    "video/*",
-  ];
+  // Empty / unset allowedMimeTypes → allow all (BFF already filters uploads).
+  // Set security.allowedMimeTypes explicitly to restrict (e.g. ["image/*", "application/pdf"]).
   const rawAllowedMime = Array.isArray(security.allowedMimeTypes) ? security.allowedMimeTypes : [];
   const allowedMimeTypes = rawAllowedMime.length > 0
     ? rawAllowedMime.filter((v: unknown) => typeof v === "string") as string[]
-    : defaultMimeTypes;
+    : ["*/*"];
   const rawUriAllowlist = Array.isArray(security.fileUriAllowlist) ? security.fileUriAllowlist : [];
   const fileUriAllowlist = rawUriAllowlist.filter((v: unknown) => typeof v === "string") as string[];
   const inboundMediaDir = resolveConfiguredPath(

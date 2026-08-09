@@ -109,7 +109,7 @@
           "allowedMimeTypes": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Allowed MIME type patterns for file transfer (e.g. \"image/*\", \"application/pdf\")"
+            "description": "Allowed MIME type patterns for file transfer (e.g. \"image/*\", \"application/pdf\"). Empty/unset allows all types."
           },
           "maxFileSizeBytes": {
             "type": "number",

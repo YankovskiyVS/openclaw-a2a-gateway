@@ -280,15 +280,26 @@ function stripMimeParams(mimeType: string): string {
 
 /**
  * Check if a MIME type matches any of the allowed patterns.
- * Supports wildcard subtype: "image/*" matches "image/png".
+ * Supports:
+ * - "*" or star-slash-star — allow any non-empty MIME
+ * - wildcard subtype: "image/*" matches "image/png"
  * MIME parameters (;charset=...) are stripped before matching.
+ * Empty allowedPatterns → allow all (same as unset plugin config).
  */
 export function validateMimeType(mimeType: string, allowedPatterns: string[]): boolean {
   const normalized = stripMimeParams(mimeType).toLowerCase();
   if (!normalized) return false;
 
+  if (!allowedPatterns || allowedPatterns.length === 0) {
+    return true;
+  }
+
   for (const pattern of allowedPatterns) {
     const p = stripMimeParams(pattern).toLowerCase();
+    if (!p) continue;
+
+    // Allow-all
+    if (p === "*" || p === "*/*") return true;
 
     // Exact match
     if (normalized === p) return true;

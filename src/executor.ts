@@ -47,7 +47,7 @@ import {
 } from "./file-security.js";
 import {
   localPathIndex,
-  materializeInboundInlineFiles,
+  materializeInboundFiles,
 } from "./inbound-media.js";
 
 const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
@@ -474,6 +474,7 @@ function formatFilePartAsText(
     (typeof asString(obj.localPath) === "string" ? asString(obj.localPath) : undefined);
 
   // Prefer materialized workspace path for tools (pdf/zip/…).
+  // URI parts are downloaded into a2a-inbox before this runs.
   if (localPath) {
     return [
       `[Attached: ${name} (${mimeType}) → ${localPath}]`,
@@ -481,7 +482,7 @@ function formatFilePartAsText(
     ].join("\n");
   }
 
-  // URI-based file (legacy FilePart or a2a-go flattened url)
+  // URI-based file fallback (materialize failed / not yet downloaded)
   const uri = asString(file.uri) || asString(obj.url);
   if (uri) {
     return `[Attached: ${name} (${mimeType}) → ${uri}]`;
@@ -1648,22 +1649,44 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       return;
     }
 
-    // Write inline files into OpenClaw workspace so pdf/zip tools get an allowed absolute path.
+    // Materialize inline bytes and download FileWithUri into OpenClaw workspace
+    // so pdf/zip tools get an allowed absolute path (agent must not fetch S3 itself).
     let localPaths: Map<string, string> | undefined;
     try {
-      const materialized = materializeInboundInlineFiles(
-        requestContext.userMessage,
-        this.security.inboundMediaDir,
-      );
+      const materialized = await materializeInboundFiles(requestContext.userMessage, {
+        mediaDir: this.security.inboundMediaDir,
+        security: this.security,
+      });
       if (materialized.length > 0) {
         localPaths = localPathIndex(materialized);
+        const uriCount = materialized.filter((f) => f.sourceUri).length;
         this.api.logger.info(
-          `a2a-gateway: materialized ${materialized.length} inbound file(s) under ${this.security.inboundMediaDir}`,
+          `a2a-gateway: materialized ${materialized.length} inbound file(s)` +
+            (uriCount > 0 ? ` (${uriCount} from URI)` : "") +
+            ` under ${this.security.inboundMediaDir}`,
         );
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       this.api.logger.warn(`a2a-gateway: failed to materialize inbound files: ${message}`);
+      const rejectedMessage = agentMessage(contextId, [
+        textPart(`Failed to materialize attached file(s): ${message}`),
+      ], taskId);
+      if (this.isQueuedTask(requestContext)) {
+        publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_FAILED, {
+          statusMessage: rejectedMessage,
+        });
+      } else {
+        publishTask(
+          eventBus,
+          buildTask(taskId, contextId, TaskState.TASK_STATE_FAILED, {
+            statusMessage: rejectedMessage,
+            history: existingHistory,
+          }),
+        );
+      }
+      eventBus.finished();
+      return;
     }
 
     if (this.isQueuedTask(requestContext)) {
@@ -2210,8 +2233,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
   /**
    * Validate inbound FileParts for scheme/IP safety, MIME, and size.
    *
-   * Inbound validation is lighter than outbound (a2a_send_file):
-   * - Scheme + IP-literal check only (no DNS resolution — we don't fetch the URL)
+   * Inbound URI parts are also downloaded into a2a-inbox during materialize
+   * (full SSRF + allowlist via validateUri). Here we do a fast pre-check:
+   * - Scheme + IP-literal check
    * - MIME whitelist
    * - Inline size limit
    */

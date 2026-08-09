@@ -284,6 +284,27 @@ describe("validateMimeType", () => {
   it("strips MIME parameters before matching (exact)", () => {
     assert.equal(validateMimeType("text/plain; charset=utf-8", patterns), true);
   });
+
+  it("allows all when patterns empty", () => {
+    assert.equal(
+      validateMimeType(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        [],
+      ),
+      true,
+    );
+  });
+
+  it("allows all for * and */*", () => {
+    assert.equal(
+      validateMimeType(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ["*/*"],
+      ),
+      true,
+    );
+    assert.equal(validateMimeType("application/x-executable", ["*"]), true);
+  });
 });
 
 // ---------------------------------------------------------------------------
