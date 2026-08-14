@@ -101,6 +101,178 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
+const LEGACY_JSON_RPC_METHODS: Readonly<Record<string, string>> = Object.freeze({
+  "message/send": "SendMessage",
+  "tasks/get": "GetTask",
+  "tasks/cancel": "CancelTask",
+});
+
+function toModernJsonPart(value: unknown): Record<string, unknown> {
+  const part = asObject(value);
+  if (part.kind === "text" && typeof part.text === "string") {
+    return { text: part.text, ...(part.metadata ? { metadata: part.metadata } : {}) };
+  }
+  if (part.kind === "file") {
+    const file = asObject(part.file);
+    const common = {
+      filename: asString(file.name, asString(part.filename)),
+      mediaType: asString(file.mimeType, asString(file.mediaType, asString(part.mediaType))),
+      ...(part.metadata ? { metadata: part.metadata } : {}),
+    };
+    if (typeof file.uri === "string") {
+      return { url: file.uri, ...common };
+    }
+    if (typeof file.bytes === "string") {
+      return { raw: file.bytes, ...common };
+    }
+  }
+  if (part.kind === "data" && Object.hasOwn(part, "data")) {
+    return { data: part.data, ...(part.metadata ? { metadata: part.metadata } : {}) };
+  }
+  return part;
+}
+
+function toModernJsonMessage(value: unknown): Record<string, unknown> {
+  const message = asObject(value);
+  const role = asString(message.role);
+  return {
+    ...message,
+    role: role === "user" ? "ROLE_USER" : role === "agent" ? "ROLE_AGENT" : role,
+    parts: Array.isArray(message.parts) ? message.parts.map(toModernJsonPart) : [],
+  };
+}
+
+export function normalizeLegacyJsonRpcEnvelope(body: unknown): boolean {
+  const envelope = asObject(body);
+  const method = asString(envelope.method);
+  const normalizedMethod = LEGACY_JSON_RPC_METHODS[method];
+  if (!normalizedMethod) {
+    return false;
+  }
+
+  envelope.method = normalizedMethod;
+  const params = asObject(envelope.params);
+  envelope.params = params;
+  if (
+    (normalizedMethod === "SendMessage" || normalizedMethod === "SendStreamingMessage") &&
+    params.message
+  ) {
+    params.message = toModernJsonMessage(params.message);
+  }
+  if (!Object.hasOwn(params, "tenant")) {
+    params.tenant = "";
+  }
+  if (
+    (normalizedMethod === "SendMessage" || normalizedMethod === "SendStreamingMessage") &&
+    !params.configuration
+  ) {
+    params.configuration = {
+      acceptedOutputModes: ["text"],
+      returnImmediately: false,
+    };
+  }
+  return true;
+}
+
+const LEGACY_TASK_STATES: Readonly<Record<string, string>> = Object.freeze({
+  TASK_STATE_SUBMITTED: "submitted",
+  TASK_STATE_WORKING: "working",
+  TASK_STATE_COMPLETED: "completed",
+  TASK_STATE_FAILED: "failed",
+  TASK_STATE_CANCELED: "canceled",
+  TASK_STATE_INPUT_REQUIRED: "input-required",
+  TASK_STATE_REJECTED: "rejected",
+  TASK_STATE_AUTH_REQUIRED: "auth-required",
+});
+
+function toLegacyJsonPart(value: unknown): Record<string, unknown> {
+  const part = asObject(value);
+  const metadata = asObject(part.metadata);
+  if (typeof part.text === "string") {
+    return { kind: "text", text: part.text, ...(metadata ? { metadata } : {}) };
+  }
+  if (typeof part.url === "string") {
+    return {
+      kind: "file",
+      file: {
+        uri: part.url,
+        name: asString(part.filename),
+        mimeType: asString(part.mediaType),
+      },
+      ...(metadata ? { metadata } : {}),
+    };
+  }
+  if (typeof part.raw === "string") {
+    return {
+      kind: "file",
+      file: {
+        bytes: part.raw,
+        name: asString(part.filename),
+        mimeType: asString(part.mediaType),
+      },
+      ...(metadata ? { metadata } : {}),
+    };
+  }
+  if (Object.hasOwn(part, "data")) {
+    return { kind: "data", data: part.data, ...(metadata ? { metadata } : {}) };
+  }
+  return part;
+}
+
+function toLegacyJsonMessage(value: unknown): Record<string, unknown> {
+  const message = asObject(value);
+  const role = asString(message.role);
+  return {
+    ...message,
+    kind: "message",
+    role: role === "ROLE_USER" ? "user" : role === "ROLE_AGENT" ? "agent" : role,
+    parts: Array.isArray(message.parts) ? message.parts.map(toLegacyJsonPart) : [],
+  };
+}
+
+function toLegacyJsonTask(value: unknown): Record<string, unknown> {
+  const task = asObject(value);
+  const status = asObject(task.status);
+  const artifacts = Array.isArray(task.artifacts)
+    ? task.artifacts.map((entry) => {
+        const artifact = asObject(entry);
+        return {
+          ...artifact,
+          parts: Array.isArray(artifact.parts) ? artifact.parts.map(toLegacyJsonPart) : [],
+        };
+      })
+    : task.artifacts;
+
+  return {
+    ...task,
+    kind: "task",
+    status: {
+      ...status,
+      state: LEGACY_TASK_STATES[asString(status.state)] ?? asString(status.state),
+      ...(status.message ? { message: toLegacyJsonMessage(status.message) } : {}),
+    },
+    ...(Array.isArray(task.history)
+      ? { history: task.history.map(toLegacyJsonMessage) }
+      : {}),
+    ...(artifacts ? { artifacts } : {}),
+  };
+}
+
+export function normalizeLegacyJsonRpcResponse(value: unknown): unknown {
+  const envelope = asObject(value);
+  const result = asObject(envelope.result);
+  if (result.task) {
+    return { ...envelope, result: toLegacyJsonTask(result.task) };
+  }
+  if (result.message) {
+    return { ...envelope, result: toLegacyJsonMessage(result.message) };
+  }
+  if (result.id && result.status) {
+    return { ...envelope, result: toLegacyJsonTask(result) };
+  }
+  return value;
+}
+
 function normalizeHttpPath(value: string, fallback: string): string {
   const trimmed = value.trim() || fallback;
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
@@ -412,7 +584,7 @@ function normalizeCardPath(): string {
 const plugin = {
   id: "a2a-gateway",
   name: "A2A Gateway",
-  description: "OpenClaw plugin that serves A2A v0.3.0 endpoints",
+  description: "OpenClaw plugin that serves A2A v1.0 endpoints with legacy v0.3 JSON-RPC message/send compatibility",
 
   register(api: OpenClawPluginApi) {
     const config = parseConfig(api.pluginConfig, api.resolvePath?.bind(api));
@@ -698,6 +870,17 @@ const plugin = {
       // Default express.json() limit is 100kb — inline file parts (base64) exceed it quickly.
       // Parse here with a higher limit so the SDK's inner express.json() is a no-op.
       express.json({ limit: "35mb" }),
+      (req: express.Request, res: express.Response, next: express.NextFunction) => {
+        const legacyRequest = normalizeLegacyJsonRpcEnvelope(req.body);
+        if (legacyRequest && !req.header("A2A-Version")) {
+          req.headers["a2a-version"] = "1.0";
+        }
+        if (legacyRequest) {
+          const sendJson = res.json.bind(res);
+          res.json = ((body: unknown) => sendJson(normalizeLegacyJsonRpcResponse(body))) as typeof res.json;
+        }
+        next();
+      },
       jsonRpcHandler({
         requestHandler,
         userBuilder,
@@ -999,17 +1182,23 @@ const plugin = {
         label: "A2A Send File",
         parameters: sendFileParams,
         async execute(toolCallId, params) {
-          const peer = findPeer(params.peer);
+          const input = asObject(params);
+          const peerName = asString(input.peer);
+          const uri = asString(input.uri);
+          const fileName = asString(input.name);
+          const mimeType = asString(input.mimeType);
+          const messageText = asString(input.text);
+          const peer = findPeer(peerName);
           if (!peer) {
             const available = getEffectivePeers().map((p) => p.name).join(", ") || "(none)";
             return {
-              content: [{ type: "text" as const, text: `Peer not found: "${params.peer}". Available peers: ${available}` }],
+              content: [{ type: "text" as const, text: `Peer not found: "${peerName}". Available peers: ${available}` }],
               details: { ok: false },
             };
           }
 
           // Security checks: SSRF, MIME, file size
-          const uriCheck = await validateUri(params.uri, config.security);
+          const uriCheck = await validateUri(uri, config.security);
           if (!uriCheck.ok) {
             return {
               content: [{ type: "text" as const, text: `URI rejected: ${uriCheck.reason}` }],
@@ -1017,26 +1206,26 @@ const plugin = {
             };
           }
 
-          if (params.mimeType && !validateMimeType(params.mimeType, config.security.allowedMimeTypes)) {
+          if (mimeType && !validateMimeType(mimeType, config.security.allowedMimeTypes)) {
             return {
-              content: [{ type: "text" as const, text: `MIME type rejected: "${params.mimeType}" is not in the allowed list` }],
+              content: [{ type: "text" as const, text: `MIME type rejected: "${mimeType}" is not in the allowed list` }],
               details: { ok: false },
             };
           }
 
           const parts: Array<Record<string, unknown>> = [];
-          if (params.text) {
-            parts.push({ text: params.text });
+          if (messageText) {
+            parts.push({ text: messageText });
           }
           parts.push({
-            url: params.uri,
-            ...(params.name ? { filename: params.name } : {}),
-            ...(params.mimeType ? { mediaType: params.mimeType } : {}),
+            url: uri,
+            ...(fileName ? { filename: fileName } : {}),
+            ...(mimeType ? { mediaType: mimeType } : {}),
           });
 
           try {
             const message: Record<string, unknown> = { parts };
-            const targetAgentName = asString(params.agentName, "") || asString(params.agentId, "");
+            const targetAgentName = asString(input.agentName, "") || asString(input.agentId, "");
             if (targetAgentName) {
               message.agentName = targetAgentName;
             }
@@ -1046,18 +1235,18 @@ const plugin = {
             });
             if (result.ok) {
               return {
-                content: [{ type: "text" as const, text: `File sent to ${params.peer} via A2A.\nURI: ${params.uri}\nResponse: ${JSON.stringify(result.response)}` }],
+                content: [{ type: "text" as const, text: `File sent to ${peerName} via A2A.\nURI: ${uri}\nResponse: ${JSON.stringify(result.response)}` }],
                 details: { ok: true, response: result.response },
               };
             }
             return {
-              content: [{ type: "text" as const, text: `Failed to send file to ${params.peer}: ${JSON.stringify(result.response)}` }],
+              content: [{ type: "text" as const, text: `Failed to send file to ${peerName}: ${JSON.stringify(result.response)}` }],
               details: { ok: false, response: result.response },
             };
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             return {
-              content: [{ type: "text" as const, text: `Error sending file to ${params.peer}: ${msg}` }],
+              content: [{ type: "text" as const, text: `Error sending file to ${peerName}: ${msg}` }],
               details: { ok: false, error: msg },
             };
           }

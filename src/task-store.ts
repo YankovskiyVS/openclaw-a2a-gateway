@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { Task } from "@a2a-js/sdk";
+import { TaskState, type ListTasksRequest, type ListTasksResponse, type Task } from "@a2a-js/sdk";
 import type { ServerCallContext, TaskStore } from "@a2a-js/sdk/server";
 
 function cloneTask(task: Task): Task {
@@ -18,6 +18,59 @@ export class FileTaskStore implements TaskStore {
 
   constructor(tasksDir: string) {
     this.tasksDir = path.resolve(tasksDir);
+  }
+
+  async list(
+    params: ListTasksRequest,
+    _context: ServerCallContext,
+  ): Promise<ListTasksResponse> {
+    const taskIds = await this.listAll();
+    const loaded = await Promise.all(taskIds.map((taskId) => this.load(taskId)));
+    let tasks = loaded.filter((task): task is Task => task !== undefined);
+
+    if (params.contextId) {
+      tasks = tasks.filter((task) => task.contextId === params.contextId);
+    }
+    if (
+      params.status !== TaskState.TASK_STATE_UNSPECIFIED &&
+      params.status !== TaskState.UNRECOGNIZED
+    ) {
+      tasks = tasks.filter((task) => task.status?.state === params.status);
+    }
+    if (params.statusTimestampAfter) {
+      const threshold = Date.parse(params.statusTimestampAfter);
+      if (Number.isFinite(threshold)) {
+        tasks = tasks.filter((task) => {
+          const timestamp = task.status?.timestamp;
+          return Boolean(timestamp) && Date.parse(timestamp ?? "") >= threshold;
+        });
+      }
+    }
+
+    tasks.sort((left, right) => left.id.localeCompare(right.id));
+    const totalSize = tasks.length;
+    const pageSize = Math.min(100, Math.max(1, params.pageSize ?? 50));
+    const parsedOffset = /^\d+$/.test(params.pageToken) ? Number(params.pageToken) : 0;
+    const offset = Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
+    const page = tasks.slice(offset, offset + pageSize).map((task) => {
+      const projected = cloneTask(task);
+      if (params.historyLength !== undefined && projected.history) {
+        const historyLength = Math.max(0, params.historyLength);
+        projected.history = historyLength === 0 ? [] : projected.history.slice(-historyLength);
+      }
+      if (!params.includeArtifacts) {
+        projected.artifacts = [];
+      }
+      return projected;
+    });
+    const nextOffset = offset + page.length;
+
+    return {
+      tasks: page,
+      nextPageToken: nextOffset < totalSize ? String(nextOffset) : "",
+      pageSize,
+      totalSize,
+    };
   }
 
   async load(taskId: string, _context?: ServerCallContext): Promise<Task | undefined> {

@@ -10,11 +10,14 @@ import { TaskState } from "@a2a-js/sdk";
  * We pre-seed a stub task for brand-new messageIds before delegating.
  */
 export function installStableTaskIds(DefaultRequestHandler: {
-  prototype: Record<string, unknown>;
+  prototype: object;
 }): boolean {
-  const proto = DefaultRequestHandler.prototype as Record<string, unknown> & {
+  const proto = DefaultRequestHandler.prototype as unknown as Record<string, unknown> & {
     __openclawStableTaskIdPatched?: boolean;
-    _createRequestContext?: (request: unknown, context: unknown) => Promise<unknown>;
+    _createRequestContext?: (
+      request: { message?: Record<string, unknown> },
+      context: unknown,
+    ) => Promise<unknown>;
     taskStore?: {
       load: (id: string, context: unknown) => Promise<{ history?: Array<{ messageId?: string }> } | undefined>;
       save: (task: unknown, context: unknown) => Promise<void>;

@@ -117,19 +117,19 @@ describe("session key format (PR #9, issue #8)", () => {
 });
 
 describe("a2a-gateway plugin", () => {
-  it("builds an Agent Card with protocolVersion 0.3.0 and required fields", async () => {
+  it("builds an Agent Card with protocolVersion 1.0 and required fields", async () => {
     const payload = buildAgentCard(makeConfig() as unknown as GatewayConfig) as Record<string, unknown>;
     assertPrimaryProtocolVersion(payload);
     assert.equal(payload.name, "Test Agent");
 
     // Verify spec-required fields
     assert.ok(payload.securitySchemes !== undefined, "securitySchemes should be present");
-    assert.ok(payload.security !== undefined, "security should be present");
+    assert.ok(payload.securityRequirements !== undefined, "securityRequirements should be present");
 
     const capabilities = payload.capabilities as Record<string, unknown>;
     assert.equal(capabilities.streaming, true);
     assert.equal(capabilities.pushNotifications, false);
-    assert.equal(capabilities.stateTransitionHistory, false);
+    assert.equal(capabilities.extendedAgentCard, false);
   });
 
   it("dispatches inbound messages via gateway RPC", async () => {

@@ -1,8 +1,14 @@
 {
   "id": "a2a-gateway",
   "name": "A2A Gateway",
-  "description": "OpenClaw A2A v0.3.0 gateway with Agent Card, JSON-RPC, and REST endpoints",
-  "version": "1.3.0",
+  "description": "OpenClaw A2A v1.0 gateway with legacy v0.3 JSON-RPC message/send compatibility",
+  "version": "1.4.0",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": ["a2a_send_file"]
+  },
   "defaultConfig": {
     "agentCard": {
       "name": "OpenClaw A2A Gateway",

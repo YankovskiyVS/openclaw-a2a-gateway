@@ -99,7 +99,7 @@ describe("multi-round conversation routing", () => {
     }
   });
 
-  it("keeps taskContextByTaskId mapped for multiple taskIds in the same context", async () => {
+  it("cleans taskContextByTaskId after completed rounds", async () => {
     const MockWS = createMockWebSocketClass();
     const originalWebSocket = (globalThis as any).WebSocket;
     (globalThis as any).WebSocket = MockWS;
@@ -111,8 +111,8 @@ describe("multi-round conversation routing", () => {
       await executeRound(executor, "task-map-2", "ctx-shared");
 
       const taskContextByTaskId = (executor as any).taskContextByTaskId as Map<string, string>;
-      assert.equal(taskContextByTaskId.get("task-map-1"), "ctx-shared");
-      assert.equal(taskContextByTaskId.get("task-map-2"), "ctx-shared");
+      assert.equal(taskContextByTaskId.has("task-map-1"), false);
+      assert.equal(taskContextByTaskId.has("task-map-2"), false);
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -297,9 +297,9 @@ describe("FileTaskStore multi-round persistence", () => {
       const restored = await store.load("task-1");
 
       assert.ok(restored, "task should load after repeated saves");
-      assert.equal(restored.status.state, "completed");
-      assert.equal(restored.status.message?.parts?.[0]?.kind, "text");
-      assert.equal(restored.status.message?.parts?.[0]?.text, "latest-completed-message");
+      assert.equal(restored.status.state, TaskState.TASK_STATE_COMPLETED);
+      const restoredPart = restored.status.message?.parts?.[0] as unknown as Record<string, unknown>;
+      assert.equal(partTextFromJson(restoredPart), "latest-completed-message");
     } finally {
       await rm(tasksDir, { recursive: true, force: true });
     }

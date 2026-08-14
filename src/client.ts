@@ -61,6 +61,103 @@ function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+function normalizeLegacyAgentCard(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+  const card = payload as Record<string, unknown>;
+  if (Array.isArray(card.supportedInterfaces) && card.supportedInterfaces.length > 0) {
+    return payload;
+  }
+
+  const url = asString(card.url).trim();
+  if (!url) {
+    return payload;
+  }
+  const protocolVersion = asString(card.protocolVersion, "0.3.0");
+  const rawCapabilities =
+    card.capabilities && typeof card.capabilities === "object"
+      ? (card.capabilities as Record<string, unknown>)
+      : {};
+  const rawSkills = Array.isArray(card.skills) ? card.skills : [];
+
+  return {
+    name: asString(card.name, "A2A Agent"),
+    description: asString(card.description, asString(card.name, "A2A Agent")),
+    supportedInterfaces: [
+      {
+        url,
+        protocolBinding: "JSONRPC",
+        tenant: "",
+        protocolVersion,
+      },
+    ],
+    provider: undefined,
+    version: asString(card.version, protocolVersion),
+    capabilities: {
+      streaming: rawCapabilities.streaming === true,
+      pushNotifications: rawCapabilities.pushNotifications === true,
+      extensions: [],
+      extendedAgentCard: false,
+    },
+    securitySchemes: {},
+    securityRequirements: [],
+    defaultInputModes: Array.isArray(card.defaultInputModes)
+      ? card.defaultInputModes.filter((mode): mode is string => typeof mode === "string")
+      : ["text"],
+    defaultOutputModes: Array.isArray(card.defaultOutputModes)
+      ? card.defaultOutputModes.filter((mode): mode is string => typeof mode === "string")
+      : ["text"],
+    skills: rawSkills.map((entry, index) => {
+      const skill =
+        entry && typeof entry === "object" && !Array.isArray(entry)
+          ? (entry as Record<string, unknown>)
+          : {};
+      const name = asString(skill.name, asString(skill.id, `skill-${index + 1}`));
+      return {
+        id: asString(skill.id, `skill-${index + 1}`),
+        name,
+        description: asString(skill.description, name),
+        tags: Array.isArray(skill.tags)
+          ? skill.tags.filter((tag): tag is string => typeof tag === "string")
+          : [],
+        examples: [],
+        inputModes: [],
+        outputModes: [],
+        securityRequirements: [],
+      };
+    }),
+    signatures: [],
+  };
+}
+
+async function normalizeAgentCardResponse(response: Response): Promise<Response> {
+  if (!response.ok) {
+    return response;
+  }
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.includes("json")) {
+    return response;
+  }
+
+  try {
+    const payload = await response.clone().json();
+    const normalized = normalizeLegacyAgentCard(payload);
+    if (normalized === payload) {
+      return response;
+    }
+    const headers = new Headers(response.headers);
+    headers.set("content-type", "application/json");
+    return new Response(JSON.stringify(normalized), {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  } catch {
+    return response;
+  }
+}
+
 function normalizeOutboundRole(role: unknown): Role | undefined {
   if (role === Role.ROLE_USER || role === Role.ROLE_AGENT) {
     return role;
@@ -94,7 +191,9 @@ function normalizeOutboundPart(part: unknown): Message["parts"][number] {
     return textPart(obj.text);
   }
   if (typeof obj.url === "string") {
-    return urlPart(obj.url, asString(obj.mimeType, asString(obj.mediaType, "")));
+    const normalized = urlPart(obj.url, asString(obj.mimeType, asString(obj.mediaType, "")));
+    normalized.filename = asString(obj.filename, asString(obj.name, ""));
+    return normalized;
   }
   if (obj.kind === "text" && typeof obj.text === "string") {
     return textPart(obj.text);
@@ -103,7 +202,9 @@ function normalizeOutboundPart(part: unknown): Message["parts"][number] {
     const file = obj.file as Record<string, unknown> | undefined;
     const uri = file && typeof file.uri === "string" ? file.uri : "";
     if (uri) {
-      return urlPart(uri, asString(file.mimeType, ""));
+      const normalized = urlPart(uri, asString(file?.mimeType, ""));
+      normalized.filename = asString(file?.name, "");
+      return normalized;
     }
   }
   return textPart("");
@@ -166,16 +267,23 @@ export class A2AClient {
       : baseFetch;
   }
 
+  private createCardFetch(peer: PeerConfig): typeof fetch {
+    const authenticatedFetch = this.createFetch(peer);
+    return (async (input: RequestInfo | URL, init?: RequestInit) =>
+      normalizeAgentCardResponse(await authenticatedFetch(input, init))) as typeof fetch;
+  }
+
   /**
    * Create a ClientFactory with auth-aware fetch for a given peer.
    */
   private buildFactory(peer: PeerConfig): { factory: ClientFactory; path: string } {
     const { baseUrl: _baseUrl, path } = parseAgentCardUrl(peer.agentCardUrl);
     const authFetch = this.createFetch(peer);
+    const cardFetch = this.createCardFetch(peer);
 
     // Inject auth fetch into card resolver and all transports
     const options = ClientFactoryOptions.createFrom(ClientFactoryOptions.default, {
-      cardResolver: new DefaultAgentCardResolver({ fetchImpl: authFetch }),
+      cardResolver: new DefaultAgentCardResolver({ fetchImpl: cardFetch }),
       transports: [
         new JsonRpcTransportFactory({ fetchImpl: authFetch }),
         new RestTransportFactory({ fetchImpl: authFetch }),
@@ -195,12 +303,12 @@ export class A2AClient {
   async discoverAgentCard(peer: PeerConfig, timeoutMs = 30_000): Promise<Record<string, unknown>> {
     const { baseUrl, path } = parseAgentCardUrl(peer.agentCardUrl);
     const { factory } = this.buildFactory(peer);
-    const authFetch = this.createFetch(peer);
+    const cardFetch = this.createCardFetch(peer);
 
     // createFromUrl resolves the card internally
     await factory.createFromUrl(baseUrl, path);
 
-    const response = await authFetch(`${baseUrl}${path}`, {
+    const response = await cardFetch(`${baseUrl}${path}`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
 
@@ -259,6 +367,101 @@ export class A2AClient {
     return result;
   }
 
+  private async resolveLegacyEndpoint(
+    peer: PeerConfig,
+    baseUrl: string,
+    path: string,
+  ): Promise<string | undefined> {
+    try {
+      const response = await this.createFetch(peer)(`${baseUrl}${path}`, {
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        return undefined;
+      }
+      const card = await response.json() as Record<string, unknown>;
+      if (
+        Array.isArray(card.supportedInterfaces) ||
+        typeof card.url !== "string" ||
+        !card.url.trim()
+      ) {
+        return undefined;
+      }
+      return new URL(card.url, baseUrl).toString();
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async doSendLegacyJsonRpc(
+    peer: PeerConfig,
+    endpoint: string,
+    outboundMessage: Message,
+    targetAgentName: string,
+  ): Promise<OutboundSendResult> {
+    const parts = outboundMessage.parts.map((part) => {
+      switch (part.content?.$case) {
+        case "text":
+          return { kind: "text", text: part.content.value };
+        case "url":
+          return {
+            kind: "file",
+            file: {
+              uri: part.content.value,
+              name: part.filename,
+              mimeType: part.mediaType,
+            },
+          };
+        case "data":
+          return { kind: "data", data: part.content.value, mimeType: part.mediaType };
+        default:
+          return { kind: "text", text: "" };
+      }
+    });
+    const legacyMessage = {
+      messageId: outboundMessage.messageId,
+      role: outboundMessage.role === Role.ROLE_AGENT ? "agent" : "user",
+      contextId: outboundMessage.contextId,
+      taskId: outboundMessage.taskId,
+      parts,
+      ...(targetAgentName ? { agentName: targetAgentName } : {}),
+    };
+    const id = uuidv4();
+
+    try {
+      const response = await this.createFetch(peer)(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          method: "message/send",
+          params: { message: legacyMessage },
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const payload = await response.json() as Record<string, unknown>;
+      if (!response.ok || payload.error) {
+        return {
+          ok: false,
+          statusCode: response.status || 500,
+          response: payload,
+        };
+      }
+      return {
+        ok: true,
+        statusCode: response.status,
+        response: (payload.result as Record<string, unknown> | undefined) ?? payload,
+      };
+    } catch (error: unknown) {
+      return {
+        ok: false,
+        statusCode: 500,
+        response: { error: error instanceof Error ? error.message : String(error) },
+      };
+    }
+  }
+
   /**
    * Core send logic with automatic transport fallback.
    *
@@ -299,6 +502,11 @@ export class A2AClient {
       referenceTaskIds: [],
     };
 
+    const legacyEndpoint = await this.resolveLegacyEndpoint(peer, baseUrl, path);
+    if (legacyEndpoint) {
+      return this.doSendLegacyJsonRpc(peer, legacyEndpoint, outboundMessage, targetAgentName);
+    }
+
     const sendParams: SendMessageRequest = {
       tenant: "",
       message: outboundMessage,
@@ -331,7 +539,7 @@ export class A2AClient {
     try {
       // Use SDK's card resolver (which already handles auth)
       const resolver = new DefaultAgentCardResolver({
-        fetchImpl: this.createFetch(peer),
+        fetchImpl: this.createCardFetch(peer),
       });
       const agentCard = await resolver.resolve(baseUrl, path);
 

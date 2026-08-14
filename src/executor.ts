@@ -1499,7 +1499,7 @@ class GatewayRpcConnection {
       if (frame.event === "exec.approval.requested" && this.onExecApprovalRequested) {
         const payload = asObject(frame.payload);
         if (payload && typeof payload.id === "string") {
-          this.onExecApprovalRequested(payload as ExecApprovalRequestPayload);
+          this.onExecApprovalRequested(payload as unknown as ExecApprovalRequestPayload);
         }
       }
       return;
@@ -2050,7 +2050,13 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         throw new Error(`OpenAI HTTP dispatch failed (${response.status}): ${bodyPreview}`);
       }
 
-      if (useStream && streamOptions && response.body) {
+      const responseContentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (
+        useStream &&
+        streamOptions &&
+        response.body &&
+        responseContentType.includes("text/event-stream")
+      ) {
         return await this.readOpenAIStreamResponse(response.body, streamOptions, abortController.signal);
       }
 

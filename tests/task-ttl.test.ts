@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import type { Task } from "@a2a-js/sdk";
+import { TaskState, type Task } from "@a2a-js/sdk";
 
 import { runTaskCleanup } from "../src/task-cleanup.js";
 import { FileTaskStore } from "../src/task-store.js";
@@ -49,6 +49,65 @@ describe("FileTaskStore extensions", () => {
       assert.ok(ids.includes("alpha-uno"));
       assert.ok(ids.includes("beta-dos"));
       assert.ok(ids.includes("gamma-tres"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("list filters, paginates, and projects history and artifacts", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "a2a-task-list-"));
+    try {
+      const store = new FileTaskStore(dir);
+      const task = (id: string, state: TaskState): Task => ({
+        id,
+        contextId: "ctx-shared",
+        status: { state, timestamp: new Date().toISOString() },
+        history: [
+          { messageId: id + "-1", role: "ROLE_USER", parts: [] },
+          { messageId: id + "-2", role: "ROLE_AGENT", parts: [] },
+        ],
+        artifacts: [{
+          artifactId: id + "-artifact",
+          name: "result",
+          description: "",
+          parts: [],
+          extensions: [],
+        }],
+      } as Task);
+
+      await store.save(task("alpha", TaskState.TASK_STATE_COMPLETED));
+      await store.save(task("beta", TaskState.TASK_STATE_COMPLETED));
+      await store.save(task("gamma", TaskState.TASK_STATE_WORKING));
+
+      const first = await store.list({
+        contextId: "ctx-shared",
+        status: TaskState.TASK_STATE_COMPLETED,
+        pageSize: 1,
+        pageToken: "",
+        historyLength: 0,
+        includeArtifacts: false,
+      } as any, {} as any);
+
+      assert.equal(first.totalSize, 2);
+      assert.equal(first.pageSize, 1);
+      assert.equal(first.nextPageToken, "1");
+      assert.deepEqual(first.tasks.map((entry) => entry.id), ["alpha"]);
+      assert.deepEqual(first.tasks[0].history, []);
+      assert.deepEqual(first.tasks[0].artifacts, []);
+
+      const second = await store.list({
+        contextId: "ctx-shared",
+        status: TaskState.TASK_STATE_COMPLETED,
+        pageSize: 1,
+        pageToken: first.nextPageToken,
+        historyLength: 1,
+        includeArtifacts: true,
+      } as any, {} as any);
+
+      assert.equal(second.nextPageToken, "");
+      assert.deepEqual(second.tasks.map((entry) => entry.id), ["beta"]);
+      assert.equal(second.tasks[0].history?.length, 1);
+      assert.equal(second.tasks[0].artifacts?.length, 1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

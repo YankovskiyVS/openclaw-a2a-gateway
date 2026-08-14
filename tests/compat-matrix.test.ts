@@ -22,6 +22,9 @@ import {
   createHarness,
   createMockWebSocketClass,
   invokeGatewayMethod,
+  isTextPart,
+  isUrlPart,
+  lastPublishedTask,
   makeConfig,
   registerPlugin,
   silentLogger,
@@ -307,7 +310,7 @@ describe("compat: Agent Card parsing variations", () => {
     const defaultCard = buildAgentCard({} as unknown as GatewayConfig) as Record<string, unknown>;
     assertPrimaryProtocolVersion(defaultCard);
     assert.ok(defaultCard.name, "should have a name");
-    assert.ok(defaultCard.url, "should have a url");
+    assertPrimaryAgentUrl(defaultCard);
     assert.ok(Array.isArray(defaultCard.skills), "should have skills array");
 
     // Partial config — only name provided
@@ -403,7 +406,7 @@ describe("compat: inbound message format variations", () => {
               {
                 kind: "file",
                 file: {
-                  uri: "https://example.com/report.pdf",
+                  bytes: Buffer.from("test PDF").toString("base64"),
                   mimeType: "application/pdf",
                   name: "report.pdf",
                 },
@@ -750,14 +753,14 @@ describe("compat: response format variations", () => {
         } as any,
       );
 
-      const finalTask = published[published.length - 1] as Record<string, unknown>;
+      const finalTask = lastPublishedTask(published);
       const status = finalTask.status as Record<string, unknown>;
-      assert.equal(status.state, "completed");
+      assert.equal(status.state, TaskState.TASK_STATE_COMPLETED);
 
       const msg = status.message as Record<string, unknown>;
       const parts = msg.parts as Array<Record<string, unknown>>;
       assert.ok(parts.length >= 1, "should have at least one part");
-      assert.equal(parts[0].kind, "text");
+      assert.ok(isTextPart(parts[0]), "should contain a text part");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -799,15 +802,15 @@ describe("compat: response format variations", () => {
         } as any,
       );
 
-      const finalTask = published[published.length - 1] as Record<string, unknown>;
+      const finalTask = lastPublishedTask(published);
       const status = finalTask.status as Record<string, unknown>;
-      assert.equal(status.state, "completed");
+      assert.equal(status.state, TaskState.TASK_STATE_COMPLETED);
 
       const msg = status.message as Record<string, unknown>;
       const parts = msg.parts as Array<Record<string, unknown>>;
 
-      const textParts = parts.filter((p) => p.kind === "text");
-      const fileParts = parts.filter((p) => p.kind === "file");
+      const textParts = parts.filter((p) => isTextPart(p));
+      const fileParts = parts.filter((p) => isUrlPart(p));
       assert.ok(textParts.length >= 1, "should have text part");
       assert.equal(fileParts.length, 2, "should have two file parts (deduped from mediaUrl + mediaUrls)");
     } finally {

@@ -410,7 +410,9 @@ export function assertPrimaryAgentUrl(card: Record<string, unknown>) {
 
 export function isUrlPart(part: Record<string, unknown>): boolean {
   const content = part.content as { $case?: string } | undefined;
-  return content?.$case === "url" || typeof part.url === "string";
+  const file = part.file as Record<string, unknown> | undefined;
+  return content?.$case === "url" || typeof part.url === "string" ||
+    (part.kind === "file" && typeof file?.uri === "string");
 }
 
 export function isTextPart(part: Record<string, unknown>): boolean {

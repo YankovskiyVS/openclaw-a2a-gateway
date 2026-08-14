@@ -202,7 +202,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
         lane.queue.length,
         this.totalQueued(),
       );
-      requestContext.task = buildTask(
+      const queuedTask = buildTask(
         requestContext.taskId,
         requestContext.contextId,
         TaskState.TASK_STATE_SUBMITTED,
@@ -215,7 +215,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
         },
       );
       eventBus.publish(
-        AgentEvent.task(requestContext.task),
+        AgentEvent.task(queuedTask),
       );
     });
   }
