@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![A2A v1.0](https://img.shields.io/badge/A2A-v1.0-green.svg)](https://github.com/a2aproject/A2A)
-[![Tests](https://img.shields.io/badge/tests-486%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-544%20passing-brightgreen.svg)]()
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-blue.svg)]()
 
 [English](README.md) | [简体中文](README_CN.md) | [繁體中文](README_TW.md) | [日本語](README_JA.md) | [한국어](README_KO.md) | [Français](README_FR.md) | [Español](README_ES.md) | [Deutsch](README_DE.md) | [Italiano](README_IT.md) | [Русский](README_RU.md) | [Português (Brasil)](README_PT-BR.md)
@@ -42,6 +42,7 @@ A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that 
 - **Telemetry metrics** endpoint with optional bearer auth
 - **Durable task store** on disk with TTL cleanup and concurrency limits
 - **Tool approval (HITL)**: `before_tool_call` pauses the agent turn until the A2A client sends `metadata.toolApproval` (`allow-once` / `allow-always` / `deny`)
+- **Tool progress messages**: opt-in mirroring of real tool start/result events into bounded A2A task history
 
 ## Architecture
 
@@ -470,6 +471,24 @@ node <PLUGIN_PATH>/skill/scripts/a2a-send.mjs \
 | `security.maxFileSizeBytes` | number | `52428800` | Max file size for URI-based files (50MB) |
 | `security.maxInlineFileSizeBytes` | number | `10485760` | Max inline base64 file size (10MB) |
 | `security.fileUriAllowlist` | array | `[]` | URI hostname allowlist (empty = allow all public) |
+
+### Tool progress messages
+
+Set `metadata.toolProgressMessagesLimit` on an inbound A2A message to mirror real OpenClaw tool `start` and `result` lifecycle events as `TASK_STATE_WORKING` agent messages. The feature is opt-in, deduplicates repeated terminal events, redacts credential-shaped values, truncates large payloads, and is capped at 50 messages.
+
+For a history containing exactly one user message and twenty agent messages, request 19 progress messages; the normal completed response becomes agent message 20:
+
+```json
+{ "metadata": { "toolProgressMessagesLimit": 19 } }
+```
+
+Run the real browser/model scenario against an already running gateway:
+
+```bash
+A2A_PEER_URL=http://127.0.0.1:18800 npm run test:live:a2a:twenty
+```
+
+The script asserts a 21-message history (`1 user + 19 tool progress + 1 final`), prints the complete agent transcript, and fails if browser start/result events are absent.
 
 ### Tool approval (human-in-the-loop)
 

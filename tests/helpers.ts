@@ -109,9 +109,11 @@ export function createMockWebSocketClass(options?: {
   onConnect?: (params: Record<string, unknown>) => Record<string, unknown>;
   agentResponseText?: string;
   agentResponsePayloads?: Array<Record<string, unknown>>;
+  agentEvents?: Array<Record<string, unknown>>;
 }) {
   const agentResponseText = options?.agentResponseText ?? "Gateway response";
   const agentResponsePayloads = options?.agentResponsePayloads;
+  const agentEvents = options?.agentEvents ?? [];
 
   return class MockGatewaySocket {
     readyState = 0;
@@ -160,6 +162,15 @@ export function createMockWebSocketClass(options?: {
       if (frame.method === "agent") {
         options?.onAgent?.(frame.params || {});
         this.respond(frame.id, true, { status: "accepted" });
+        for (const payload of agentEvents) {
+          this.emit("message", {
+            data: JSON.stringify({
+              type: "event",
+              event: "agent",
+              payload,
+            }),
+          });
+        }
         const payloads = agentResponsePayloads ?? [{ text: agentResponseText }];
         this.respond(frame.id, true, {
           status: "ok",

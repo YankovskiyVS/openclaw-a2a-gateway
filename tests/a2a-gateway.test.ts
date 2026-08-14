@@ -181,6 +181,97 @@ describe("a2a-gateway plugin", () => {
     }
   });
 
+  it("mirrors a bounded number of real tool events as A2A agent messages", async () => {
+    const api = createApi();
+    const MockWS = createMockWebSocketClass({
+      agentEvents: [
+        {
+          runId: "openclaw-run",
+          stream: "tool",
+          data: {
+            phase: "start",
+            toolCallId: "browser-1",
+            name: "browser",
+            args: {
+              action: "open",
+              url: "https://example.com",
+              apiKey: "must-not-leak",
+            },
+          },
+        },
+        {
+          runId: "openclaw-run",
+          stream: "tool",
+          data: {
+            phase: "result",
+            toolCallId: "browser-1",
+            name: "browser",
+            result: { title: "Example Domain" },
+          },
+        },
+        {
+          runId: "openclaw-run",
+          stream: "tool",
+          data: {
+            phase: "start",
+            toolCallId: "browser-2",
+            name: "browser",
+            args: { action: "find", text: "documentation" },
+          },
+        },
+      ],
+    });
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = MockWS;
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+      const published: Array<Record<string, unknown>> = [];
+      await executor.execute(
+        {
+          taskId: "task-tool-progress",
+          contextId: "ctx-tool-progress",
+          userMessage: {
+            messageId: "msg-tool-progress",
+            role: "ROLE_USER",
+            agentId: "writer-agent",
+            metadata: { toolProgressMessagesLimit: 2 },
+            parts: [{ text: "research with browser" }],
+          },
+        } as any,
+        {
+          publish(event: Record<string, unknown>) {
+            published.push(event);
+          },
+          finished() {},
+        } as any,
+      );
+      const progressTexts = published
+        .filter((event) => event.kind === "statusUpdate")
+        .map((event) =>
+          (event.data as Record<string, unknown>).status as Record<string, unknown>
+        )
+        .filter((status) =>
+          status.state === TaskState.TASK_STATE_WORKING &&
+          status.message &&
+          typeof status.message === "object"
+        )
+        .map((status) => {
+          const message = status.message as Record<string, unknown>;
+          const parts = message.parts as Array<Record<string, unknown>>;
+          return partTextFromJson(parts[0]);
+        });
+      assert.equal(progressTexts.length, 2);
+      assert.match(progressTexts[0], /Calling browser/);
+      assert.match(progressTexts[0], /https:\/\/example\.com/);
+      assert.match(progressTexts[0], /\[redacted\]/);
+      assert.doesNotMatch(progressTexts[0], /must-not-leak/);
+      assert.match(progressTexts[1], /browser result/);
+      assert.match(progressTexts[1], /Example Domain/);
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
   it("uses OpenAI HTTP dispatch with x-openclaw-model override when metadata.llm.modelName is provided", async () => {
     const api = createApi();
     const originalFetch = globalThis.fetch;
