@@ -146,7 +146,7 @@ export interface GatewayConfig {
      * Long-running prompts should use async task mode (blocking=false) + tasks/get polling.
      */
     agentResponseTimeoutMs?: number;
-    /** Max time for OpenAI-compatible HTTP dispatch path (/v1/chat/completions). */
+    /** Max time for OpenAI-compatible HTTP dispatch path (/v1/chat/completions). Default 6m. */
     openAIRequestTimeoutMs?: number;
   };
   resilience: PeerResilienceConfig;

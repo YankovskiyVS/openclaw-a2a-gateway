@@ -259,6 +259,12 @@
             "type": "number",
             "default": 300000,
             "minimum": 1000
+          },
+          "openAIRequestTimeoutMs": {
+            "type": "number",
+            "default": 360000,
+            "minimum": 1000,
+            "description": "Max wait for OpenAI-compatible HTTP dispatch (/v1/chat/completions)"
           }
         }
       },

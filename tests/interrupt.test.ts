@@ -125,5 +125,7 @@ describe("ActiveRunRegistry", () => {
     const timeout = new Error("The operation was aborted due to timeout");
     timeout.name = "TimeoutError";
     assert.equal(isAbortError(timeout), false);
+    assert.equal(isAbortError(new Error("Agent run timed out")), false);
+    assert.equal(isAbortError(new Error("surface_error: timeout")), false);
   });
 });

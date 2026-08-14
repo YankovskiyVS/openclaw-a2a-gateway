@@ -32,6 +32,7 @@ import {
 } from "./tool-approval.js";
 import { toolApprovalBridge } from "./tool-approval-bridge.js";
 import { extractInterruptSignal, isInterruptOnlyMessage } from "./interrupt.js";
+import { agentRunFailureMessage } from "./agent-run-failure.js";
 import {
   abortOpenClawAgent,
   activeRuns,
@@ -51,7 +52,7 @@ import {
 } from "./inbound-media.js";
 
 const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
-const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 360_000;
 const GATEWAY_CONNECT_TIMEOUT_MS = 10_000;
 const GATEWAY_REQUEST_TIMEOUT_MS = 10_000;
 const HOOKS_WAKE_TIMEOUT_MS = 5_000;
@@ -98,6 +99,62 @@ interface GatewayStreamContext {
   toolApprovalEnabled: boolean;
   /** OpenClaw result events sometimes omit `name`; remember it from start. */
   toolNamesByCallId: Map<string, string>;
+  /** Set when lifecycle stream reports a terminal failure (timeout/error). */
+  fatalError?: string;
+  fatalTimer?: ReturnType<typeof setTimeout>;
+  /** Invoked when a fatal lifecycle error becomes definitive (unblocks agent wait). */
+  onFatal?: (message: string) => void;
+}
+
+/** Short grace for transient lifecycle `error` before failing the A2A task. */
+const LIFECYCLE_ERROR_FAIL_GRACE_MS = 2_000;
+
+function clearStreamFatalTimer(stream: GatewayStreamContext): void {
+  if (!stream.fatalTimer) {
+    return;
+  }
+  clearTimeout(stream.fatalTimer);
+  stream.fatalTimer = undefined;
+}
+
+function markStreamFatal(
+  stream: GatewayStreamContext,
+  message: string,
+  immediate = false,
+): void {
+  clearStreamFatalTimer(stream);
+  const apply = () => {
+    stream.fatalError = message;
+    try {
+      stream.onFatal?.(message);
+    } catch {
+      // ignore listener failures
+    }
+  };
+  if (immediate) {
+    apply();
+    return;
+  }
+  stream.fatalTimer = setTimeout(apply, LIFECYCLE_ERROR_FAIL_GRACE_MS);
+  stream.fatalTimer.unref?.();
+}
+
+function waitForStreamFatal(stream: GatewayStreamContext): Promise<never> {
+  return new Promise((_, reject) => {
+    if (stream.fatalError) {
+      reject(new Error(stream.fatalError));
+      return;
+    }
+    const previous = stream.onFatal;
+    stream.onFatal = (message) => {
+      try {
+        previous?.(message);
+      } catch {
+        // ignore
+      }
+      reject(new Error(message));
+    };
+  });
 }
 
 function normalizeToolPayload(value: unknown): Record<string, unknown> | undefined {
@@ -123,6 +180,36 @@ function handleGatewayAgentEvent(
 
   const streamKind = asString(payload.stream);
   const data = asObject(payload.data) ?? {};
+
+  if (streamKind === "lifecycle") {
+    const phase = asString(data.phase);
+    if (phase === "start") {
+      // Retry/failover restart — cancel pending fatal and keep waiting.
+      clearStreamFatalTimer(stream);
+      stream.fatalError = undefined;
+      return;
+    }
+    if (phase === "error") {
+      markStreamFatal(
+        stream,
+        asString(data.error) || asString(data.message) || "Agent run failed",
+        false,
+      );
+      return;
+    }
+    if (phase === "end") {
+      const status = asString(data.status);
+      const error = asString(data.error);
+      // Hard timeout / abort: fail the A2A task immediately so clients are not
+      // left on WORKING while gateway `agent` wait never sends a final frame.
+      if (data.aborted === true || status === "timeout") {
+        markStreamFatal(stream, error || "Agent run timed out", true);
+      } else if (status === "error" || error) {
+        markStreamFatal(stream, error || "Agent run failed", true);
+      }
+    }
+    return;
+  }
 
   if (streamKind === "assistant") {
     // Do NOT trim: LLM deltas often start/end with spaces (" слегка", " 👋").
@@ -2149,13 +2236,38 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         sessionKey,
       };
 
-      const finalPayload = await gateway.request(
+      // Race the Gateway `agent` wait against lifecycle failure. OpenClaw can
+      // log surface_error / end the embedded run without ever sending the final
+      // RPC frame (expectFinal stays pending) — without this, A2A stays WORKING
+      // until agentResponseTimeoutMs (default 5m) and the chat UI hangs.
+      const agentWait = gateway.request(
         "agent",
         agentParams,
         this.agentResponseTimeoutMs,
         true,
         abortController.signal,
       );
+      const finalPayload = gatewayStream
+        ? await Promise.race([
+            agentWait,
+            waitForStreamFatal(gatewayStream).catch((err: unknown) => {
+              const message = err instanceof Error ? err.message : String(err);
+              try {
+                abortController.abort(new Error(message));
+              } catch {
+                // ignore
+              }
+              throw err instanceof Error ? err : new Error(message);
+            }),
+          ])
+        : await agentWait;
+      if (gatewayStream?.fatalError) {
+        throw new Error(gatewayStream.fatalError);
+      }
+      const failure = agentRunFailureMessage(finalPayload);
+      if (failure) {
+        throw new Error(failure);
+      }
       const finalBody = asObject(finalPayload);
       const status = asString(finalBody?.status);
       if (status && status !== "ok") {
@@ -2185,6 +2297,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       throw new Error("No assistant response text returned by gateway");
     } finally {
       if (gatewayStream) {
+        clearStreamFatalTimer(gatewayStream);
         toolApprovalBridge.unregisterStream(gatewayStream.runId);
       }
       if (gatewayStream && streamContext) {

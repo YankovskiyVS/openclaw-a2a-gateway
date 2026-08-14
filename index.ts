@@ -360,7 +360,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     },
     timeouts: {
       agentResponseTimeoutMs: asNumber(timeouts.agentResponseTimeoutMs, 300_000),
-      openAIRequestTimeoutMs: asNumber(timeouts.openAIRequestTimeoutMs, 60_000),
+      openAIRequestTimeoutMs: asNumber(timeouts.openAIRequestTimeoutMs, 360_000),
     },
     resilience: {
       healthCheck: {

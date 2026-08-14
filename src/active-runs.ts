@@ -244,6 +244,10 @@ export function isAbortError(err: unknown): boolean {
     // AbortSignal.timeout() → TimeoutError / "aborted due to timeout" must stay FAILED.
     if (err.name === "TimeoutError") return false;
     if (/due to timeout/i.test(err.message)) return false;
+    // Lifecycle/surface_error fail-fast must publish TASK_STATE_FAILED, not cancel.
+    if (/agent run timed out|agent run failed|surface_error/i.test(err.message)) {
+      return false;
+    }
     if (err.name === "AbortError" || err.name === "RunCanceledError") return true;
     if (/aborted|canceled|cancelled/i.test(err.message)) return true;
   }
