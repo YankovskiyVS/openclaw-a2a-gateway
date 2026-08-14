@@ -22,11 +22,46 @@ import {
   createHarness,
   createMockWebSocketClass,
   invokeGatewayMethod,
+  isTextPart,
+  isUrlPart,
+  lastPublishedTask,
   makeConfig,
   registerPlugin,
   silentLogger,
   TaskState,
 } from "./helpers.js";
+
+function successfulJsonRpcResponse(body: Record<string, unknown>): Record<string, unknown> {
+  const message = {
+    messageId: "reply-1",
+    contextId: "",
+    taskId: "",
+    parts: [{ text: "accepted" }],
+  };
+  return body.method === "message/send"
+    ? {
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          ...message,
+          kind: "message",
+          role: "agent",
+          parts: [{ kind: "text", text: "accepted" }],
+        },
+      }
+    : {
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          message: {
+            ...message,
+            role: "ROLE_AGENT",
+            extensions: [],
+            referenceTaskIds: [],
+          },
+        },
+      };
+}
 
 // ---------------------------------------------------------------------------
 // 1. Agent Card variations
@@ -56,7 +91,7 @@ describe("compat: Agent Card parsing variations", () => {
         const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
         received.push(body);
         return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { accepted: true } }),
+          JSON.stringify(successfulJsonRpcResponse(body)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
@@ -120,7 +155,7 @@ describe("compat: Agent Card parsing variations", () => {
         const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
         received.push(body);
         return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { accepted: true } }),
+          JSON.stringify(successfulJsonRpcResponse(body)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
@@ -174,7 +209,7 @@ describe("compat: Agent Card parsing variations", () => {
         const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
         received.push(body);
         return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { accepted: true } }),
+          JSON.stringify(successfulJsonRpcResponse(body)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
@@ -225,7 +260,7 @@ describe("compat: Agent Card parsing variations", () => {
         const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
         received.push(body);
         return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { accepted: true } }),
+          JSON.stringify(successfulJsonRpcResponse(body)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
@@ -275,7 +310,7 @@ describe("compat: Agent Card parsing variations", () => {
           const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
           received.push(body);
           return new Response(
-            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { accepted: true } }),
+            JSON.stringify(successfulJsonRpcResponse(body)),
             { status: 200, headers: { "content-type": "application/json" } },
           );
         }
@@ -307,7 +342,7 @@ describe("compat: Agent Card parsing variations", () => {
     const defaultCard = buildAgentCard({} as unknown as GatewayConfig) as Record<string, unknown>;
     assertPrimaryProtocolVersion(defaultCard);
     assert.ok(defaultCard.name, "should have a name");
-    assert.ok(defaultCard.url, "should have a url");
+    assertPrimaryAgentUrl(defaultCard);
     assert.ok(Array.isArray(defaultCard.skills), "should have skills array");
 
     // Partial config — only name provided
@@ -403,7 +438,7 @@ describe("compat: inbound message format variations", () => {
               {
                 kind: "file",
                 file: {
-                  uri: "https://example.com/report.pdf",
+                  bytes: Buffer.from("test PDF").toString("base64"),
                   mimeType: "application/pdf",
                   name: "report.pdf",
                 },
@@ -750,14 +785,14 @@ describe("compat: response format variations", () => {
         } as any,
       );
 
-      const finalTask = published[published.length - 1] as Record<string, unknown>;
+      const finalTask = lastPublishedTask(published);
       const status = finalTask.status as Record<string, unknown>;
-      assert.equal(status.state, "completed");
+      assert.equal(status.state, TaskState.TASK_STATE_COMPLETED);
 
       const msg = status.message as Record<string, unknown>;
       const parts = msg.parts as Array<Record<string, unknown>>;
       assert.ok(parts.length >= 1, "should have at least one part");
-      assert.equal(parts[0].kind, "text");
+      assert.ok(isTextPart(parts[0]), "should contain a text part");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -799,15 +834,15 @@ describe("compat: response format variations", () => {
         } as any,
       );
 
-      const finalTask = published[published.length - 1] as Record<string, unknown>;
+      const finalTask = lastPublishedTask(published);
       const status = finalTask.status as Record<string, unknown>;
-      assert.equal(status.state, "completed");
+      assert.equal(status.state, TaskState.TASK_STATE_COMPLETED);
 
       const msg = status.message as Record<string, unknown>;
       const parts = msg.parts as Array<Record<string, unknown>>;
 
-      const textParts = parts.filter((p) => p.kind === "text");
-      const fileParts = parts.filter((p) => p.kind === "file");
+      const textParts = parts.filter((p) => isTextPart(p));
+      const fileParts = parts.filter((p) => isUrlPart(p));
       assert.ok(textParts.length >= 1, "should have text part");
       assert.equal(fileParts.length, 2, "should have two file parts (deduped from mediaUrl + mediaUrls)");
     } finally {
@@ -852,7 +887,7 @@ describe("compat: transport header variations", () => {
         }
         const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
         return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { accepted: true } }),
+          JSON.stringify(successfulJsonRpcResponse(body)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
@@ -917,7 +952,7 @@ describe("compat: transport header variations", () => {
         }
         const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
         return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { accepted: true } }),
+          JSON.stringify(successfulJsonRpcResponse(body)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
@@ -987,7 +1022,7 @@ describe("compat: transport header variations", () => {
           id: "test-1",
           method: "message/send",
           params: {
-            message: { messageId: "m1", role: "ROLE_USER", parts: [{ text: "no auth" }] },
+            message: { messageId: `m1-${port}`, role: "ROLE_USER", parts: [{ text: "no auth" }] },
           },
         }),
         signal: AbortSignal.timeout(5_000),
@@ -1008,7 +1043,7 @@ describe("compat: transport header variations", () => {
           id: "test-2",
           method: "message/send",
           params: {
-            message: { messageId: "m2", role: "ROLE_USER", parts: [{ text: "with auth" }] },
+            message: { messageId: `m2-${port}`, role: "ROLE_USER", parts: [{ text: "with auth" }] },
           },
         }),
         signal: AbortSignal.timeout(30_000),
@@ -1016,7 +1051,10 @@ describe("compat: transport header variations", () => {
 
       assert.equal(authResp.status, 200, "should accept request with correct auth");
       const authBody = await authResp.json() as Record<string, unknown>;
-      assert.ok(!authBody.error, "should not have error with correct auth");
+      assert.ok(
+        !authBody.error,
+        `should not have error with correct auth: ${JSON.stringify(authBody)}`,
+      );
 
       await service!.stop({} as any);
     } finally {

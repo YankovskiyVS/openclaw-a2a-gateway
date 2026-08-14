@@ -12,6 +12,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import http from "node:http";
 import dns from "node:dns";
 
@@ -60,12 +61,9 @@ interface BenchmarkResult {
 }
 
 const results: BenchmarkResult[] = [];
-const OUTPUT_PATH = path.join(
-  process.env.HOME!,
-  "Desktop",
-  "A2A-仿生研究",
-  "研究文档",
-  "06-benchmark-results.md",
+const OUTPUT_PATH = process.env.A2A_BENCHMARK_OUTPUT?.trim() || path.join(
+  os.tmpdir(),
+  "openclaw-a2a-gateway-benchmark-results.md",
 );
 
 const noopLog = () => {};
@@ -540,29 +538,32 @@ describe("Dimension 4: QS Discovery Efficiency", () => {
       { activateThreshold: 5, deactivateThreshold: 2 },
       noopLog,
     );
-    (quorumMgr as any).running = true;
+    const tickOnce = async () => {
+      (quorumMgr as any).running = true;
+      await (quorumMgr as any).tick();
+      // tick() schedules the next adaptive timer; clear it between manual steps.
+      quorumMgr.stop();
+    };
 
     // 1 peer → explore
     setDiscoveredPeers(dnsMgr, 1);
-    await (quorumMgr as any).tick();
+    await tickOnce();
     assert.equal(quorumMgr.getMode(), "explore");
 
     // 6 peers → stable
     setDiscoveredPeers(dnsMgr, 6);
-    await (quorumMgr as any).tick();
+    await tickOnce();
     assert.equal(quorumMgr.getMode(), "stable");
 
     // 3 peers → still stable (hysteresis: 3 >= deactivate=2)
     setDiscoveredPeers(dnsMgr, 3);
-    await (quorumMgr as any).tick();
+    await tickOnce();
     assert.equal(quorumMgr.getMode(), "stable");
 
     // 1 peer → explore
     setDiscoveredPeers(dnsMgr, 1);
-    await (quorumMgr as any).tick();
+    await tickOnce();
     assert.equal(quorumMgr.getMode(), "explore");
-
-    quorumMgr.stop();
   });
 });
 

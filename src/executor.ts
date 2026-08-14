@@ -55,6 +55,8 @@ const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
 const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 360_000;
 const GATEWAY_CONNECT_TIMEOUT_MS = 10_000;
 const GATEWAY_REQUEST_TIMEOUT_MS = 10_000;
+// OpenClaw 2026.7.1-2 requires Gateway WebSocket protocol v4.
+const GATEWAY_PROTOCOL_VERSION = 4;
 const HOOKS_WAKE_TIMEOUT_MS = 5_000;
 const TASK_CONTEXT_CACHE_LIMIT = 10_000;
 const MODEL_ID_PREFIX = "cloudru/";
@@ -73,6 +75,10 @@ const STREAMING_HEARTBEAT_INTERVAL_MS = 15_000;
  * The SDK's tasks/get historyLength param can further trim on read.
  */
 const MAX_HISTORY_MESSAGES = 200;
+
+/** Opt-in cap for A2A status messages derived from real tool lifecycle events. */
+const MAX_TOOL_PROGRESS_MESSAGES = 50;
+const TOOL_PROGRESS_SUMMARY_LIMIT = 500;
 
 /**
  * Structured response from OpenClaw Gateway agent dispatch.
@@ -99,6 +105,10 @@ interface GatewayStreamContext {
   toolApprovalEnabled: boolean;
   /** OpenClaw result events sometimes omit `name`; remember it from start. */
   toolNamesByCallId: Map<string, string>;
+  /** Maximum number of real tool lifecycle events mirrored as A2A messages. */
+  toolProgressMessagesLimit: number;
+  toolProgressMessagesPublished: number;
+  toolProgressMessageKeys: Set<string>;
   /** Set when lifecycle stream reports a terminal failure (timeout/error). */
   fatalError?: string;
   fatalTimer?: ReturnType<typeof setTimeout>;
@@ -165,6 +175,96 @@ function normalizeToolPayload(value: unknown): Record<string, unknown> | undefin
     return value as Record<string, unknown>;
   }
   return { value };
+}
+
+function extractToolProgressMessagesLimit(userMessage: unknown): number {
+  const message = asObject(userMessage);
+  const metadata = asObject(message?.metadata);
+  const rawLimit = metadata?.toolProgressMessagesLimit;
+  if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit)) {
+    return 0;
+  }
+  return Math.min(MAX_TOOL_PROGRESS_MESSAGES, Math.max(0, Math.floor(rawLimit)));
+}
+
+function sanitizeToolProgressValue(value: unknown, depth = 0): unknown {
+  if (depth > 3) {
+    return "[truncated]";
+  }
+  if (typeof value === "string") {
+    const redacted = value
+      .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
+      .replace(/([?&](?:api_?key|access_?token|token)=)[^&\s]+/gi, "$1[redacted]");
+    return redacted.length > 300 ? redacted.slice(0, 300) + "…" : redacted;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 8).map((entry) => sanitizeToolProgressValue(entry, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    const sanitized: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>).slice(0, 12)) {
+      sanitized[key] = /api.?key|authorization|password|secret|token/i.test(key)
+        ? "[redacted]"
+        : sanitizeToolProgressValue(entry, depth + 1);
+    }
+    return sanitized;
+  }
+  return value;
+}
+
+function compactToolProgressValue(value: unknown): string {
+  if (value == null) {
+    return "";
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(sanitizeToolProgressValue(value));
+  } catch {
+    serialized = String(value);
+  }
+  return serialized.length > TOOL_PROGRESS_SUMMARY_LIMIT
+    ? serialized.slice(0, TOOL_PROGRESS_SUMMARY_LIMIT) + "…"
+    : serialized;
+}
+
+function publishToolProgressMessage(
+  stream: GatewayStreamContext,
+  toolData: Record<string, unknown>,
+  phase: "start" | "result",
+): void {
+  if (stream.toolProgressMessagesPublished >= stream.toolProgressMessagesLimit) {
+    return;
+  }
+  const callId = asString(toolData.callId) ?? "unknown";
+  const dedupeKey = callId + ":" + phase;
+  if (stream.toolProgressMessageKeys.has(dedupeKey)) {
+    return;
+  }
+  stream.toolProgressMessageKeys.add(dedupeKey);
+  const toolName = asString(toolData.name) ?? "tool";
+  const details = compactToolProgressValue(
+    phase === "start" ? toolData.input : toolData.output,
+  );
+  const nextIndex = stream.toolProgressMessagesPublished + 1;
+  const failed = toolData.isError === true;
+  const action = phase === "start"
+    ? "Calling " + toolName
+    : (failed ? toolName + " failed" : toolName + " result");
+  const suffix = details ? ": " + details : "";
+  stream.toolProgressMessagesPublished = nextIndex;
+  publishStatusUpdate(
+    stream.eventBus,
+    stream.taskId,
+    stream.contextId,
+    TaskState.TASK_STATE_WORKING,
+    {
+      statusMessage: agentMessage(
+        stream.contextId,
+        [textPart("[tool-progress " + nextIndex + "/" + stream.toolProgressMessagesLimit + "] " + action + suffix)],
+        stream.taskId,
+      ),
+    },
+  );
 }
 
 function handleGatewayAgentEvent(
@@ -307,6 +407,12 @@ function handleGatewayAgentEvent(
   }
 
   publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, toolData);
+
+  if (phase === "start") {
+    publishToolProgressMessage(stream, toolData, "start");
+  } else if (phase === "result" || phase === "error") {
+    publishToolProgressMessage(stream, toolData, "result");
+  }
 
   // Blocking HITL is handled by before_tool_call + toolApprovalBridge.
   // Do not fake input-required here — that raced the still-running agent turn.
@@ -1389,8 +1495,8 @@ class GatewayRpcConnection {
     const scopes = ["operator.admin", "operator.read", "operator.write", "operator.approvals", "operator.pairing"];
 
     const params: Record<string, unknown> = {
-      minProtocol: 3,
-      maxProtocol: 3,
+      minProtocol: GATEWAY_PROTOCOL_VERSION,
+      maxProtocol: GATEWAY_PROTOCOL_VERSION,
       client: {
         id: "cli",
         version: "a2a-gateway-plugin",
@@ -1499,7 +1605,7 @@ class GatewayRpcConnection {
       if (frame.event === "exec.approval.requested" && this.onExecApprovalRequested) {
         const payload = asObject(frame.payload);
         if (payload && typeof payload.id === "string") {
-          this.onExecApprovalRequested(payload as ExecApprovalRequestPayload);
+          this.onExecApprovalRequested(payload as unknown as ExecApprovalRequestPayload);
         }
       }
       return;
@@ -1843,7 +1949,15 @@ export class OpenClawAgentExecutor implements AgentExecutor {
           taskId: string;
           contextId: string;
           streamedText?: boolean;
-        } = { eventBus, taskId, contextId };
+          toolProgressMessagesLimit?: number;
+        } = {
+          eventBus,
+          taskId,
+          contextId,
+          toolProgressMessagesLimit: extractToolProgressMessagesLimit(
+            requestContext.userMessage,
+          ),
+        };
         agentResponse = await this.dispatchViaGatewayRpc(
           agentId,
           requestContext.userMessage,
@@ -2050,7 +2164,13 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         throw new Error(`OpenAI HTTP dispatch failed (${response.status}): ${bodyPreview}`);
       }
 
-      if (useStream && streamOptions && response.body) {
+      const responseContentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (
+        useStream &&
+        streamOptions &&
+        response.body &&
+        responseContentType.includes("text/event-stream")
+      ) {
         return await this.readOpenAIStreamResponse(response.body, streamOptions, abortController.signal);
       }
 
@@ -2158,7 +2278,10 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     agentId: string,
     userMessage: unknown,
     contextId: string,
-    streamContext?: Pick<GatewayStreamContext, "eventBus" | "taskId" | "contextId"> & { streamedText?: boolean },
+    streamContext?: Pick<GatewayStreamContext, "eventBus" | "taskId" | "contextId"> & {
+      streamedText?: boolean;
+      toolProgressMessagesLimit?: number;
+    },
     localPaths?: Map<string, string>,
   ): Promise<AgentResponse> {
     const messageText = extractInboundMessageText(userMessage, localPaths);
@@ -2176,6 +2299,9 @@ export class OpenClawAgentExecutor implements AgentExecutor {
           streamedText: false,
           toolApprovalEnabled: this.toolApprovalEnabled,
           toolNamesByCallId: new Map(),
+          toolProgressMessagesLimit: streamContext.toolProgressMessagesLimit ?? 0,
+          toolProgressMessagesPublished: 0,
+          toolProgressMessageKeys: new Set(),
         }
       : undefined;
     const gateway = new GatewayRpcConnection(gatewayConfig, {

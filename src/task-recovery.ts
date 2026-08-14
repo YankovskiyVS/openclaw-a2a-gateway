@@ -55,9 +55,15 @@ export async function recoverStaleTasks(
           continue;
         }
 
-        task.status.state = TaskState.TASK_STATE_FAILED;
-        task.status.timestamp = new Date().toISOString();
-        task.status.message = agentMessage(
+        const taskStatus = task.status ?? {
+          state: TaskState.TASK_STATE_UNSPECIFIED,
+          message: undefined,
+          timestamp: undefined,
+        };
+        task.status = taskStatus;
+        taskStatus.state = TaskState.TASK_STATE_FAILED;
+        taskStatus.timestamp = new Date().toISOString();
+        taskStatus.message = agentMessage(
           task.contextId,
           [textPart(`gateway restarted before task completed (was: ${state})`)],
           task.id,

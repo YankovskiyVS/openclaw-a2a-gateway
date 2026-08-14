@@ -4,6 +4,8 @@ import type {
   AgentExecutionEvent,
   AgentExecutor,
   ExecutionEventBus,
+  EventListener,
+  FinishedListener,
   RequestContext,
 } from "@a2a-js/sdk/server";
 import { AgentEvent } from "@a2a-js/sdk/server";
@@ -79,15 +81,18 @@ function createObservedEventBus(
       eventBus.publish(event);
     },
     on(eventName, listener) {
-      eventBus.on(eventName, listener);
+      if (eventName === "event") eventBus.on("event", listener as EventListener);
+      else eventBus.on("finished", listener as FinishedListener);
       return wrapped;
     },
     off(eventName, listener) {
-      eventBus.off(eventName, listener);
+      if (eventName === "event") eventBus.off("event", listener as EventListener);
+      else eventBus.off("finished", listener as FinishedListener);
       return wrapped;
     },
     once(eventName, listener) {
-      eventBus.once(eventName, listener);
+      if (eventName === "event") eventBus.once("event", listener as EventListener);
+      else eventBus.once("finished", listener as FinishedListener);
       return wrapped;
     },
     removeAllListeners(eventName) {
@@ -202,7 +207,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
         lane.queue.length,
         this.totalQueued(),
       );
-      requestContext.task = buildTask(
+      const queuedTask = buildTask(
         requestContext.taskId,
         requestContext.contextId,
         TaskState.TASK_STATE_SUBMITTED,
@@ -215,7 +220,7 @@ export class QueueingAgentExecutor implements AgentExecutor {
         },
       );
       eventBus.publish(
-        AgentEvent.task(requestContext.task),
+        AgentEvent.task(queuedTask),
       );
     });
   }

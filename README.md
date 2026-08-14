@@ -1,13 +1,16 @@
 # 🦞 OpenClaw A2A Gateway Plugin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![A2A v0.3.0](https://img.shields.io/badge/A2A-v0.3.0-green.svg)](https://github.com/google/A2A)
-[![Tests](https://img.shields.io/badge/tests-486%20passing-brightgreen.svg)]()
+[![A2A v1.0](https://img.shields.io/badge/A2A-v1.0-green.svg)](https://github.com/a2aproject/A2A)
+[![Tests](https://img.shields.io/badge/tests-544%20passing-brightgreen.svg)]()
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-blue.svg)]()
 
 [English](README.md) | [简体中文](README_CN.md) | [繁體中文](README_TW.md) | [日本語](README_JA.md) | [한국어](README_KO.md) | [Français](README_FR.md) | [Español](README_ES.md) | [Deutsch](README_DE.md) | [Italiano](README_IT.md) | [Русский](README_RU.md) | [Português (Brasil)](README_PT-BR.md)
 
-A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that implements the [A2A (Agent-to-Agent) v0.3.0 protocol](https://github.com/google/A2A), enabling OpenClaw agents to discover and communicate with each other across servers — with zero-config install and automatic peer discovery.
+A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that implements the [A2A (Agent-to-Agent) v1.0 protocol](https://github.com/a2aproject/A2A), with legacy v0.3 JSON-RPC message/send compatibility. It enables OpenClaw agents to discover and communicate with each other across servers — with zero-config install and automatic peer discovery.
+
+> Running OpenClaw 2026.7.1-2 with A2A, Browser, OTel Diagnostics, LLM Action
+> Judge, and Nango? See the [five-plugin integration guide (Russian)](docs/FIVE_PLUGIN_STACK_RU.md).
 
 **The only A2A gateway with adaptive, bio-inspired routing, discovery, and resilience — designed for multi-agent ecosystems at scale.**
 
@@ -42,6 +45,7 @@ A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that 
 - **Telemetry metrics** endpoint with optional bearer auth
 - **Durable task store** on disk with TTL cleanup and concurrency limits
 - **Tool approval (HITL)**: `before_tool_call` pauses the agent turn until the A2A client sends `metadata.toolApproval` (`allow-once` / `allow-always` / `deny`)
+- **Tool progress messages**: opt-in mirroring of real tool start/result events into bounded A2A task history
 
 ## Architecture
 
@@ -57,7 +61,7 @@ A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that 
 
 ## Prerequisites
 
-- **OpenClaw** ≥ 2026.3.0 installed and running
+- **OpenClaw** ≥ 2026.7.1-2 installed and running
 - **Network connectivity** between servers (Tailscale, LAN, or public IP)
 - **Node.js** ≥ 22
 
@@ -471,6 +475,43 @@ node <PLUGIN_PATH>/skill/scripts/a2a-send.mjs \
 | `security.maxInlineFileSizeBytes` | number | `10485760` | Max inline base64 file size (10MB) |
 | `security.fileUriAllowlist` | array | `[]` | URI hostname allowlist (empty = allow all public) |
 
+### Tool progress messages
+
+Set `metadata.toolProgressMessagesLimit` on an inbound A2A message to mirror real OpenClaw tool `start` and `result` lifecycle events as `TASK_STATE_WORKING` agent messages. The feature is opt-in, deduplicates repeated terminal events, redacts credential-shaped values, truncates large payloads, and is capped at 50 messages.
+
+For a history containing exactly one user message and twenty agent messages, request 19 progress messages; the normal completed response becomes agent message 20:
+
+```json
+{ "metadata": { "toolProgressMessagesLimit": 19 } }
+```
+
+Run the real browser/model scenario against an already running gateway:
+
+```bash
+A2A_PEER_URL=http://127.0.0.1:18800 npm run test:live:a2a:twenty
+```
+
+The script asserts a 21-message history (`1 user + 19 tool progress + 1 final`), prints the complete agent transcript, and fails if browser start/result events are absent.
+
+### Five-plugin OpenClaw stack smoke test
+
+The opt-in stack test starts `ghcr.io/openclaw/openclaw:2026.7.1-2` with the
+local A2A gateway, LLM action judge, and Nango proxy plugins, plus OpenClaw's
+bundled browser and diagnostics plugins. It sends a real A2A task to Cloud.ru
+Qwen, verifies one judged `nango_list_connections` call, checks the exact
+five-plugin ready line and OTel output, then removes its container, temporary
+state, config, and credential file.
+
+Keep the three plugin repositories as siblings and run:
+
+```bash
+CLOUDRU_API_KEY=... npm run test:live:stack
+```
+
+Optional overrides: `OPENCLAW_IMAGE`, `FIVE_PLUGIN_A2A_PORT`,
+`FIVE_PLUGIN_GATEWAY_PORT`, `FIVE_PLUGIN_NANGO_PORT`, and
+`FIVE_PLUGIN_TIMEOUT_MS`.
+
 ### Tool approval (human-in-the-loop)
 
 When enabled, the plugin registers `before_tool_call` and **awaits** an A2A client decision before the tool runs (OpenClaw 2026.3.x has no `requireApproval` yet — we pause via an in-process Promise and return `{ block: true }` on deny/timeout).
@@ -551,6 +592,7 @@ Aliases: `metadata.abort`, `metadata.stop` (boolean or object). The gateway look
 | `observability.metricsAuth` | string | `none` | `none` or `bearer` for metrics endpoint |
 | `observability.auditLogPath` | string | `~/.openclaw/a2a-audit.jsonl` | Path for JSONL audit log |
 | `timeouts.agentResponseTimeoutMs` | number | `300000` | Max wait for agent response (ms) |
+| `timeouts.peerRequestTimeoutMs` | number | `30000` | Max wait for Agent Card discovery and each outbound peer request (ms) |
 | `limits.maxConcurrentTasks` | number | `1` | Max active inbound agent runs **per A2A session** (`contextId`). Keep `1` for reliable tool-approval HITL. Different sessions still run in parallel. |
 | `limits.maxQueuedTasks` | number | `100` | Max queued tasks **per A2A session** before rejection |
 
@@ -734,6 +776,8 @@ All bio-inspired features are **optional and backward-compatible** — without e
 
 | Version | Highlights |
 |---------|-----------|
+| **v1.4.0** | Stale-task recovery, connection pooling, peer aliases and resilient CLI tooling |
+| **v1.3.0** | Bio-inspired routing, discovery, retry, transport selection and soft concurrency wired into runtime |
 | **v1.2.0** | Peer skills routing, mDNS self-advertisement (symmetric discovery) |
 | **v1.1.0** | URL extraction, transport fallback, push notifications, rule-based routing, DNS-SD discovery |
 | **v1.0.1** | Ed25519 device identity, metrics auth, CI |

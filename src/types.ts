@@ -150,6 +150,8 @@ export interface GatewayConfig {
     agentResponseTimeoutMs?: number;
     /** Max time for OpenAI-compatible HTTP dispatch path (/v1/chat/completions). Default 6m. */
     openAIRequestTimeoutMs?: number;
+    /** Max time for Agent Card discovery and each outbound peer request. Default 30s. */
+    peerRequestTimeoutMs?: number;
   };
   resilience: PeerResilienceConfig;
   /** DNS-SD discovery configuration. Disabled by default. */
@@ -234,4 +236,6 @@ export interface OutboundSendResult {
   ok: boolean;
   statusCode: number;
   response: unknown;
+  /** Explicit retry classification when the transport exposes enough detail. */
+  retryable?: boolean;
 }

@@ -18,6 +18,7 @@ export function isRetryable(errorOrResult: unknown): boolean {
   ) {
     const result = errorOrResult as OutboundSendResult;
     if (result.ok) return false;
+    if (typeof result.retryable === "boolean") return result.retryable;
     const code = result.statusCode;
     // 429 = rate limited → retry; 5xx = server error → retry
     return code === 429 || code >= 500;

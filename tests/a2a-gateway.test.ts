@@ -117,19 +117,19 @@ describe("session key format (PR #9, issue #8)", () => {
 });
 
 describe("a2a-gateway plugin", () => {
-  it("builds an Agent Card with protocolVersion 0.3.0 and required fields", async () => {
+  it("builds an Agent Card with protocolVersion 1.0 and required fields", async () => {
     const payload = buildAgentCard(makeConfig() as unknown as GatewayConfig) as Record<string, unknown>;
     assertPrimaryProtocolVersion(payload);
     assert.equal(payload.name, "Test Agent");
 
     // Verify spec-required fields
     assert.ok(payload.securitySchemes !== undefined, "securitySchemes should be present");
-    assert.ok(payload.security !== undefined, "security should be present");
+    assert.ok(payload.securityRequirements !== undefined, "securityRequirements should be present");
 
     const capabilities = payload.capabilities as Record<string, unknown>;
     assert.equal(capabilities.streaming, true);
     assert.equal(capabilities.pushNotifications, false);
-    assert.equal(capabilities.stateTransitionHistory, false);
+    assert.equal(capabilities.extendedAgentCard, false);
   });
 
   it("dispatches inbound messages via gateway RPC", async () => {
@@ -176,6 +176,97 @@ describe("a2a-gateway plugin", () => {
       const message = status.message as Record<string, unknown>;
       const parts = message.parts as Array<Record<string, unknown>>;
       assert.equal(partTextFromJson(parts[0]), "Gateway response");
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
+
+  it("mirrors a bounded number of real tool events as A2A agent messages", async () => {
+    const api = createApi();
+    const MockWS = createMockWebSocketClass({
+      agentEvents: [
+        {
+          runId: "openclaw-run",
+          stream: "tool",
+          data: {
+            phase: "start",
+            toolCallId: "browser-1",
+            name: "browser",
+            args: {
+              action: "open",
+              url: "https://example.com",
+              apiKey: "must-not-leak",
+            },
+          },
+        },
+        {
+          runId: "openclaw-run",
+          stream: "tool",
+          data: {
+            phase: "result",
+            toolCallId: "browser-1",
+            name: "browser",
+            result: { title: "Example Domain" },
+          },
+        },
+        {
+          runId: "openclaw-run",
+          stream: "tool",
+          data: {
+            phase: "start",
+            toolCallId: "browser-2",
+            name: "browser",
+            args: { action: "find", text: "documentation" },
+          },
+        },
+      ],
+    });
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = MockWS;
+    try {
+      const executor = new OpenClawAgentExecutor(api, makeConfig() as unknown as GatewayConfig);
+      const published: Array<Record<string, unknown>> = [];
+      await executor.execute(
+        {
+          taskId: "task-tool-progress",
+          contextId: "ctx-tool-progress",
+          userMessage: {
+            messageId: "msg-tool-progress",
+            role: "ROLE_USER",
+            agentId: "writer-agent",
+            metadata: { toolProgressMessagesLimit: 2 },
+            parts: [{ text: "research with browser" }],
+          },
+        } as any,
+        {
+          publish(event: Record<string, unknown>) {
+            published.push(event);
+          },
+          finished() {},
+        } as any,
+      );
+      const progressTexts = published
+        .filter((event) => event.kind === "statusUpdate")
+        .map((event) =>
+          (event.data as Record<string, unknown>).status as Record<string, unknown>
+        )
+        .filter((status) =>
+          status.state === TaskState.TASK_STATE_WORKING &&
+          status.message &&
+          typeof status.message === "object"
+        )
+        .map((status) => {
+          const message = status.message as Record<string, unknown>;
+          const parts = message.parts as Array<Record<string, unknown>>;
+          return partTextFromJson(parts[0]);
+        });
+      assert.equal(progressTexts.length, 2);
+      assert.match(progressTexts[0], /Calling browser/);
+      assert.match(progressTexts[0], /https:\/\/example\.com/);
+      assert.match(progressTexts[0], /\[redacted\]/);
+      assert.doesNotMatch(progressTexts[0], /must-not-leak/);
+      assert.match(progressTexts[1], /browser result/);
+      assert.match(progressTexts[1], /Example Domain/);
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
@@ -844,7 +935,15 @@ describe("a2a-gateway plugin", () => {
             jsonrpc: "2.0",
             id: payload.id,
             result: {
-              accepted: true,
+              message: {
+                messageId: "reply-a2a-send",
+                contextId: "",
+                taskId: "",
+                role: "ROLE_AGENT",
+                parts: [{ text: "accepted" }],
+                extensions: [],
+                referenceTaskIds: [],
+              },
             },
           }),
           {
@@ -879,15 +978,16 @@ describe("a2a-gateway plugin", () => {
 
       assert.equal(result.ok, true);
       assert.equal(received.length, 1);
-      assert.equal(received[0].method, "message/send");
+      assert.equal(received[0].method, "SendMessage");
 
       const params = received[0].params as Record<string, unknown>;
       assert.equal(typeof params, "object");
 
       const msg = (params as any)?.message as Record<string, unknown>;
       assert.equal(typeof msg, "object");
-      // OpenClaw extension: agentName should be forwarded for peer-side routing.
-      assert.equal(msg.agentName, "peer-agent");
+      // OpenClaw extension: agentName is carried in standard A2A message metadata.
+      const metadata = msg.metadata as Record<string, unknown>;
+      assert.equal(metadata.agentName, "peer-agent");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -921,7 +1021,17 @@ describe("a2a-gateway plugin", () => {
           JSON.stringify({
             jsonrpc: "2.0",
             id: payload.id,
-            result: { accepted: true },
+            result: {
+              message: {
+                messageId: "reply-a2a-file",
+                contextId: "",
+                taskId: "",
+                role: "ROLE_AGENT",
+                parts: [{ text: "accepted" }],
+                extensions: [],
+                referenceTaskIds: [],
+              },
+            },
           }),
           { status: 200, headers: { "content-type": "application/json" } }
         );
@@ -960,17 +1070,18 @@ describe("a2a-gateway plugin", () => {
       const params = received[0].params as Record<string, unknown>;
       const msg = (params as any)?.message as Record<string, unknown>;
 
-      // Verify agentName is forwarded
-      assert.equal(msg.agentName, "coder", "agentName should be forwarded to peer");
+      // Verify agentName is forwarded in standard A2A message metadata.
+      const metadata = msg.metadata as Record<string, unknown>;
+      assert.equal(metadata.agentName, "coder", "agentName should be forwarded to peer");
 
       // Verify FilePart structure
       const parts = msg.parts as Array<Record<string, unknown>>;
       const fileParts = parts.filter((p) => isUrlPart(p));
       assert.equal(fileParts.length, 1, "should have one file part");
-      const fp = fileParts[0] as { kind: string; file: { uri: string; name: string; mimeType: string } };
-      assert.equal(fp.file.uri, "https://example.com/report.pdf");
-      assert.equal(fp.file.name, "report.pdf");
-      assert.equal(fp.file.mimeType, "application/pdf");
+      const fp = fileParts[0] as { url: string; filename: string; mediaType: string };
+      assert.equal(fp.url, "https://example.com/report.pdf");
+      assert.equal(fp.filename, "report.pdf");
+      assert.equal(fp.mediaType, "application/pdf");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1127,10 +1238,12 @@ describe("scope verification on connect (issue #54)", () => {
   it("does not trigger fallback when scopes include operator.write", async () => {
     const api = createApi();
     let connectAttempts = 0;
+    let connectParams: Record<string, unknown> | undefined;
 
     const MockWS = createMockWebSocketClass({
-      onConnect: () => {
+      onConnect: (params) => {
         connectAttempts++;
+        connectParams = params;
         // Always return full scopes — no fallback needed
         return { scopes: ["operator.admin", "operator.read", "operator.write"] };
       },
@@ -1161,6 +1274,8 @@ describe("scope verification on connect (issue #54)", () => {
 
       // Should have connected only once — no reconnect needed
       assert.equal(connectAttempts, 1, "should connect only once when scopes are fine");
+      assert.equal(connectParams?.minProtocol, 4, "should use OpenClaw Gateway protocol v4 minimum");
+      assert.equal(connectParams?.maxProtocol, 4, "should use OpenClaw Gateway protocol v4 maximum");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }

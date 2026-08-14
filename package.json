@@ -19,27 +19,40 @@
   },
   "homepage": "https://github.com/win4r/openclaw-a2a-gateway#readme",
   "scripts": {
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:live:a2a": "node scripts/live-a2a-long.mjs",
+    "test:live:a2a:twenty": "node scripts/live-a2a-twenty-messages.mjs",
+    "test:live:stack": "node scripts/live-five-plugin-stack.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^1.0.0-alpha.0",
+    "@a2a-js/sdk": "1.0.1",
     "@bufbuild/protobuf": "^2.11.0",
     "@grpc/grpc-js": "^1.14.3",
     "express": "^4.21.2",
     "multicast-dns": "^7.2.5",
-    "uuid": "^9.0.1"
+    "uuid": "^11.1.1"
   },
   "openclaw": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "install": {
+      "minHostVersion": ">=2026.7.1-2"
+    },
+    "compat": {
+      "pluginApi": ">=2026.7.1-2"
+    }
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1-2"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^25.3.0",
     "@types/supertest": "^2.0.16",
     "@types/uuid": "^10.0.0",
-    "openclaw": "^2026.3.2",
+    "openclaw": "2026.7.1-2",
     "supertest": "^7.1.4",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3"

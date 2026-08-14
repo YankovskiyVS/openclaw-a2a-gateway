@@ -210,28 +210,12 @@ export async function abortOpenClawAgent(sessionKey: string, runId?: string): Pr
     }
   }
 
-  // Session-scoped embedded abort would kill sibling concurrent tasks.
+  // OpenClaw 2026.7 removed the former private plugin-sdk session/runner
+  // entrypoints. The public run-scoped abort above plus the live chat.abort
+  // request owned by ActiveRunRegistry are the supported cancellation paths.
+  // Never fall back to a session-wide abort when sibling runs share a session.
   if (multiPeer) {
     return aborted;
-  }
-
-  try {
-    const sessionMod = await import(
-      /* webpackIgnore: true */ "openclaw/dist/plugin-sdk/gateway/session-utils.js"
-    );
-    const runsMod = await import(
-      /* webpackIgnore: true */ "openclaw/dist/plugin-sdk/agents/pi-embedded-runner/runs.js"
-    );
-    const loaded = sessionMod.loadSessionEntry?.(sessionKey);
-    const sessionId = loaded?.entry?.sessionId as string | undefined;
-    if (sessionId && typeof runsMod.abortEmbeddedPiRun === "function") {
-      aborted = Boolean(runsMod.abortEmbeddedPiRun(sessionId)) || aborted;
-      if (aborted && typeof runsMod.waitForEmbeddedPiRunEnd === "function") {
-        await runsMod.waitForEmbeddedPiRunEnd(sessionId, 5_000);
-      }
-    }
-  } catch {
-    // OpenClaw internals may be unavailable outside the gateway process.
   }
 
   return aborted;

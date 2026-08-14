@@ -1,13 +1,16 @@
 # 🦞 Плагин OpenClaw A2A Gateway
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![A2A v0.3.0](https://img.shields.io/badge/A2A-v0.3.0-green.svg)](https://github.com/google/A2A)
-[![Tests](https://img.shields.io/badge/tests-469%20passing-brightgreen.svg)]()
+[![A2A v1.0](https://img.shields.io/badge/A2A-v1.0-green.svg)](https://github.com/a2aproject/A2A)
+[![Tests](https://img.shields.io/badge/tests-544%20passing-brightgreen.svg)]()
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-blue.svg)]()
 
 [English](README.md) | [简体中文](README_CN.md) | [繁體中文](README_TW.md) | [日本語](README_JA.md) | [한국어](README_KO.md) | [Français](README_FR.md) | [Español](README_ES.md) | [Deutsch](README_DE.md) | [Italiano](README_IT.md) | [Русский](README_RU.md) | [Português (Brasil)](README_PT-BR.md)
 
-Готовый к промышленной эксплуатации плагин для [OpenClaw](https://github.com/openclaw/openclaw), реализующий [протокол A2A (Agent-to-Agent) v0.3.0](https://github.com/google/A2A). Он позволяет агентам OpenClaw обнаруживать друг друга и обмениваться сообщениями между серверами — с установкой без конфигурации и автоматическим обнаружением пиров.
+Готовый к промышленной эксплуатации плагин для [OpenClaw](https://github.com/openclaw/openclaw), реализующий [протокол A2A (Agent-to-Agent) v1.0](https://github.com/a2aproject/A2A) с совместимостью с legacy JSON-RPC v0.3. Он позволяет агентам OpenClaw обнаруживать друг друга и обмениваться сообщениями между серверами — с установкой без конфигурации и автоматическим обнаружением пиров.
+
+> Для стека OpenClaw 2026.7.1-2 с A2A, Browser, OTel Diagnostics, LLM Action
+> Judge и Nango используйте [подробную инструкцию подключения](docs/FIVE_PLUGIN_STACK_RU.md).
 
 **Единственный A2A-шлюз с адаптивной биоинспирированной маршрутизацией, обнаружением и отказоустойчивостью — разработан для масштабных мультиагентных экосистем.**
 
@@ -52,7 +55,7 @@
 
 ## Предварительные требования
 
-- **OpenClaw** ≥ 2026.3.0 установлен и запущен
+- **OpenClaw** ≥ 2026.7.1-2 установлен и запущен
 - **Сетевое подключение** между серверами (Tailscale, LAN или публичный IP)
 - **Node.js** ≥ 22
 

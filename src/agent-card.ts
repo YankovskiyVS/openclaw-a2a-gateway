@@ -54,10 +54,16 @@ export function buildAgentCard(config: GatewayConfig): AgentCard {
   const security_ = config.security || { inboundAuth: "none", token: "" };
   if (security_.inboundAuth === "bearer") {
     securitySchemes.bearer = {
-      type: "http",
-      scheme: "bearer",
+      scheme: {
+        $case: "httpAuthSecurityScheme",
+        value: {
+          description: "Bearer token for the A2A gateway",
+          scheme: "Bearer",
+          bearerFormat: "",
+        },
+      },
     };
-    securityRequirements.push({ bearer: [] });
+    securityRequirements.push({ schemes: { bearer: { list: [] } } });
   }
 
   const grpcPort = server.port + 1;

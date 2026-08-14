@@ -61,7 +61,7 @@ export async function runTaskCleanup(
           continue;
         }
 
-        const timestamp = task.status.timestamp;
+        const timestamp = task.status?.timestamp;
         if (!timestamp) {
           // No timestamp -> can't determine age -> skip
           result.skipped += 1;

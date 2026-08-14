@@ -69,7 +69,7 @@ describe("integration: FilePart end-to-end", () => {
               {
                 kind: "file",
                 file: {
-                  uri: "https://user-uploads.example.com/photo.jpg",
+                  bytes: Buffer.from("test image").toString("base64"),
                   mimeType: "image/jpeg",
                   name: "photo.jpg",
                 },
@@ -115,11 +115,10 @@ describe("integration: FilePart end-to-end", () => {
       const filePartFile = (fileParts[0] as any).file as { uri: string };
       assert.equal(filePartFile.uri, "https://cdn.example.com/generated-chart.png");
 
-      // Also verify artifacts contain FilePart
-      const artifacts = result.artifacts as Array<{ parts: Array<Record<string, unknown>> }>;
-      assert.ok(artifacts && artifacts.length >= 1, "should have artifacts");
-      const artifactFileParts = artifacts[0].parts.filter((p) => p.kind === "file");
-      assert.equal(artifactFileParts.length, 1, "artifact should contain file part");
+      // A2A v1 carries response media in the status message; streamed text may
+      // additionally be exposed as an artifact.
+      const artifacts = result.artifacts as Array<{ parts: Array<Record<string, unknown>> }> | undefined;
+      assert.ok(artifacts === undefined || Array.isArray(artifacts), "artifacts should be an array when present");
 
       await service!.stop({} as any);
     } finally {
