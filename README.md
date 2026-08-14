@@ -10,7 +10,9 @@
 A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that implements the [A2A (Agent-to-Agent) v1.0 protocol](https://github.com/a2aproject/A2A), with legacy v0.3 JSON-RPC message/send compatibility. It enables OpenClaw agents to discover and communicate with each other across servers — with zero-config install and automatic peer discovery.
 
 > Running OpenClaw 2026.7.1-2 with A2A, Browser, OTel Diagnostics, LLM Action
-> Judge, and Nango? See the [five-plugin integration guide (Russian)](docs/FIVE_PLUGIN_STACK_RU.md).
+> Judge, and Nango? See the [five-plugin integration guide (Russian)](docs/FIVE_PLUGIN_STACK_RU.md)
+> or deploy the tested
+> [Kubernetes manifest with 1:3 requests/limits](deploy/kubernetes/openclaw-five-plugin.yaml).
 
 **The only A2A gateway with adaptive, bio-inspired routing, discovery, and resilience — designed for multi-agent ecosystems at scale.**
 
