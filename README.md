@@ -9,6 +9,9 @@
 
 A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that implements the [A2A (Agent-to-Agent) v1.0 protocol](https://github.com/a2aproject/A2A), with legacy v0.3 JSON-RPC message/send compatibility. It enables OpenClaw agents to discover and communicate with each other across servers — with zero-config install and automatic peer discovery.
 
+> Running OpenClaw 2026.7.1-2 with A2A, Browser, OTel Diagnostics, LLM Action
+> Judge, and Nango? See the [five-plugin integration guide (Russian)](docs/FIVE_PLUGIN_STACK_RU.md).
+
 **The only A2A gateway with adaptive, bio-inspired routing, discovery, and resilience — designed for multi-agent ecosystems at scale.**
 
 ## Key Features
@@ -58,7 +61,7 @@ A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that 
 
 ## Prerequisites
 
-- **OpenClaw** ≥ 2026.3.0 installed and running
+- **OpenClaw** ≥ 2026.7.1-2 installed and running
 - **Network connectivity** between servers (Tailscale, LAN, or public IP)
 - **Node.js** ≥ 22
 
@@ -773,6 +776,8 @@ All bio-inspired features are **optional and backward-compatible** — without e
 
 | Version | Highlights |
 |---------|-----------|
+| **v1.4.0** | Stale-task recovery, connection pooling, peer aliases and resilient CLI tooling |
+| **v1.3.0** | Bio-inspired routing, discovery, retry, transport selection and soft concurrency wired into runtime |
 | **v1.2.0** | Peer skills routing, mDNS self-advertisement (symmetric discovery) |
 | **v1.1.0** | URL extraction, transport fallback, push notifications, rule-based routing, DNS-SD discovery |
 | **v1.0.1** | Ed25519 device identity, metrics auth, CI |
