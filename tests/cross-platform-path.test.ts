@@ -81,3 +81,15 @@ describe("cross-platform auditLogPath default", () => {
     );
   });
 });
+
+describe("server.grpcEnabled", () => {
+  it("defaults to false so cold plugin load skips @grpc/grpc-js", () => {
+    const config = parseConfig({});
+    assert.equal(config.server.grpcEnabled, false);
+  });
+
+  it("can be enabled explicitly", () => {
+    const config = parseConfig({ server: { grpcEnabled: true } });
+    assert.equal(config.server.grpcEnabled, true);
+  });
+});

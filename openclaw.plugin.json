@@ -45,7 +45,12 @@
         "additionalProperties": false,
         "properties": {
           "host": { "type": "string", "default": "0.0.0.0" },
-          "port": { "type": "number", "default": 18800 }
+          "port": { "type": "number", "default": 18800 },
+          "grpcEnabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Start gRPC transport on port+1. Off by default — JSON-RPC is enough for agent-space; avoids slow @grpc/grpc-js cold load."
+          }
         }
       },
       "storage": {

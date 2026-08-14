@@ -13,8 +13,6 @@ import path from "node:path";
 import { AGENT_CARD_PATH } from "@a2a-js/sdk";
 import { DefaultRequestHandler } from "@a2a-js/sdk/server";
 import { UserBuilder, agentCardHandler, jsonRpcHandler, restHandler } from "@a2a-js/sdk/server/express";
-import { grpcService, A2AService, UserBuilder as GrpcUserBuilder } from "@a2a-js/sdk/server/grpc";
-import { Server as GrpcServer, ServerCredentials, status as GrpcStatus } from "@grpc/grpc-js";
 import express from "express";
 
 import { buildAgentCard } from "./src/agent-card.js";
@@ -268,6 +266,9 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     server: {
       host: asString(server.host, "0.0.0.0"),
       port: asNumber(server.port, 18800),
+      // Off by default: agent-space manager uses JSON-RPC only. Eager @grpc/grpc-js
+      // import made cold plugin load take minutes on 2 vCPU.
+      grpcEnabled: server.grpcEnabled === true,
     },
     storage: {
       tasksDir: resolveConfiguredPath(
@@ -818,7 +819,7 @@ const plugin = {
     });
 
     let server: Server | null = null;
-    let grpcServer: GrpcServer | null = null;
+    let grpcServer: { forceShutdown(): void } | null = null;
     let cleanupTimer: ReturnType<typeof setInterval> | null = null;
     const grpcPort = config.server.port + 1;
 
@@ -1104,9 +1105,18 @@ const plugin = {
           server!.once("error", reject);
         });
 
-        // Start gRPC server
+        // Start gRPC only when explicitly enabled (lazy-load — keeps cold start fast).
+        if (config.server.grpcEnabled) {
         try {
-          grpcServer = new GrpcServer();
+          const [
+            { Server: GrpcServer, ServerCredentials, status: GrpcStatus },
+            { grpcService, A2AService, UserBuilder: GrpcUserBuilder },
+          ] = await Promise.all([
+            import("@grpc/grpc-js"),
+            import("@a2a-js/sdk/server/grpc"),
+          ]);
+          const started = new GrpcServer();
+          grpcServer = started;
           const grpcUserBuilder = async (
             call: { metadata?: { get: (key: string) => unknown[] } } | unknown,
           ) => {
@@ -1126,13 +1136,13 @@ const plugin = {
             return GrpcUserBuilder.noAuthentication();
           };
 
-          grpcServer.addService(
+          started.addService(
             A2AService,
             grpcService({ requestHandler, userBuilder: grpcUserBuilder as any })
           );
 
           await new Promise<void>((resolve, reject) => {
-            grpcServer!.bindAsync(
+            started.bindAsync(
               `${config.server.host}:${grpcPort}`,
               ServerCredentials.createInsecure(),
               (error) => {
@@ -1143,7 +1153,7 @@ const plugin = {
                   return;
                 }
                 try {
-                  grpcServer!.start();
+                  started.start();
                 } catch {
                   // ignore: some grpc-js versions auto-start
                 }
@@ -1158,6 +1168,9 @@ const plugin = {
           const msg = grpcError instanceof Error ? grpcError.message : String(grpcError);
           api.logger.warn(`a2a-gateway: gRPC init failed: ${msg}`);
           grpcServer = null;
+        }
+        } else {
+          api.logger.info("a2a-gateway: gRPC disabled (server.grpcEnabled=false)");
         }
 
         // Recover tasks stuck in non-terminal states from a previous run

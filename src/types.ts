@@ -106,6 +106,8 @@ export interface GatewayConfig {
   server: {
     host: string;
     port: number;
+    /** When false (default), skip gRPC server and do not load @grpc/grpc-js at startup. */
+    grpcEnabled: boolean;
   };
   storage: {
     tasksDir: string;
