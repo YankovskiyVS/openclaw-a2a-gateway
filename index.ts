@@ -534,6 +534,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
     timeouts: {
       agentResponseTimeoutMs: asNumber(timeouts.agentResponseTimeoutMs, 300_000),
       openAIRequestTimeoutMs: asNumber(timeouts.openAIRequestTimeoutMs, 360_000),
+      peerRequestTimeoutMs: Math.max(1_000, asNumber(timeouts.peerRequestTimeoutMs, 30_000)),
     },
     resilience: {
       healthCheck: {
@@ -593,7 +594,9 @@ const plugin = {
     });
     const auditLogger = new AuditLogger(config.observability.auditLogPath);
     const pushStore = new PushNotificationStore();
-    const client = new A2AClient();
+    const client = new A2AClient({
+      requestTimeoutMs: config.timeouts?.peerRequestTimeoutMs,
+    });
     const taskStore = new FileTaskStore(config.storage.tasksDir);
     const executor = new QueueingAgentExecutor(
       new OpenClawAgentExecutor(api, config),

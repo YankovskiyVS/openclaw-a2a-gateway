@@ -844,7 +844,15 @@ describe("a2a-gateway plugin", () => {
             jsonrpc: "2.0",
             id: payload.id,
             result: {
-              accepted: true,
+              message: {
+                messageId: "reply-a2a-send",
+                contextId: "",
+                taskId: "",
+                role: "ROLE_AGENT",
+                parts: [{ text: "accepted" }],
+                extensions: [],
+                referenceTaskIds: [],
+              },
             },
           }),
           {
@@ -879,15 +887,16 @@ describe("a2a-gateway plugin", () => {
 
       assert.equal(result.ok, true);
       assert.equal(received.length, 1);
-      assert.equal(received[0].method, "message/send");
+      assert.equal(received[0].method, "SendMessage");
 
       const params = received[0].params as Record<string, unknown>;
       assert.equal(typeof params, "object");
 
       const msg = (params as any)?.message as Record<string, unknown>;
       assert.equal(typeof msg, "object");
-      // OpenClaw extension: agentName should be forwarded for peer-side routing.
-      assert.equal(msg.agentName, "peer-agent");
+      // OpenClaw extension: agentName is carried in standard A2A message metadata.
+      const metadata = msg.metadata as Record<string, unknown>;
+      assert.equal(metadata.agentName, "peer-agent");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -921,7 +930,17 @@ describe("a2a-gateway plugin", () => {
           JSON.stringify({
             jsonrpc: "2.0",
             id: payload.id,
-            result: { accepted: true },
+            result: {
+              message: {
+                messageId: "reply-a2a-file",
+                contextId: "",
+                taskId: "",
+                role: "ROLE_AGENT",
+                parts: [{ text: "accepted" }],
+                extensions: [],
+                referenceTaskIds: [],
+              },
+            },
           }),
           { status: 200, headers: { "content-type": "application/json" } }
         );
@@ -960,17 +979,18 @@ describe("a2a-gateway plugin", () => {
       const params = received[0].params as Record<string, unknown>;
       const msg = (params as any)?.message as Record<string, unknown>;
 
-      // Verify agentName is forwarded
-      assert.equal(msg.agentName, "coder", "agentName should be forwarded to peer");
+      // Verify agentName is forwarded in standard A2A message metadata.
+      const metadata = msg.metadata as Record<string, unknown>;
+      assert.equal(metadata.agentName, "coder", "agentName should be forwarded to peer");
 
       // Verify FilePart structure
       const parts = msg.parts as Array<Record<string, unknown>>;
       const fileParts = parts.filter((p) => isUrlPart(p));
       assert.equal(fileParts.length, 1, "should have one file part");
-      const fp = fileParts[0] as { kind: string; file: { uri: string; name: string; mimeType: string } };
-      assert.equal(fp.file.uri, "https://example.com/report.pdf");
-      assert.equal(fp.file.name, "report.pdf");
-      assert.equal(fp.file.mimeType, "application/pdf");
+      const fp = fileParts[0] as { url: string; filename: string; mediaType: string };
+      assert.equal(fp.url, "https://example.com/report.pdf");
+      assert.equal(fp.filename, "report.pdf");
+      assert.equal(fp.mediaType, "application/pdf");
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -276,6 +276,12 @@
             "default": 360000,
             "minimum": 1000,
             "description": "Max wait for OpenAI-compatible HTTP dispatch (/v1/chat/completions)"
+          },
+          "peerRequestTimeoutMs": {
+            "type": "number",
+            "default": 30000,
+            "minimum": 1000,
+            "description": "Max wait for Agent Card discovery and each outbound peer request"
           }
         }
       },

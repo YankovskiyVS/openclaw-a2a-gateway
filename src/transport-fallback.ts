@@ -101,6 +101,12 @@ export function isRetryableTransportError(error: unknown): boolean {
     "statusCode" in error &&
     typeof (error as any).statusCode === "number"
   ) {
+    if (
+      "retryable" in error &&
+      typeof (error as { retryable?: unknown }).retryable === "boolean"
+    ) {
+      return (error as { retryable: boolean }).retryable;
+    }
     const code = (error as any).statusCode as number;
     // 5xx = server error → could be transport-specific → retry
     // 429 = rate limit → transport-specific → retry
