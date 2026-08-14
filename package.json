@@ -22,6 +22,7 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "test:live:a2a": "node scripts/live-a2a-long.mjs",
     "test:live:a2a:twenty": "node scripts/live-a2a-twenty-messages.mjs",
+    "test:live:stack": "node scripts/live-five-plugin-stack.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

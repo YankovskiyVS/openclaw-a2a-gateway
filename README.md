@@ -490,6 +490,25 @@ A2A_PEER_URL=http://127.0.0.1:18800 npm run test:live:a2a:twenty
 
 The script asserts a 21-message history (`1 user + 19 tool progress + 1 final`), prints the complete agent transcript, and fails if browser start/result events are absent.
 
+### Five-plugin OpenClaw stack smoke test
+
+The opt-in stack test starts `ghcr.io/openclaw/openclaw:2026.7.1-2` with the
+local A2A gateway, LLM action judge, and Nango proxy plugins, plus OpenClaw's
+bundled browser and diagnostics plugins. It sends a real A2A task to Cloud.ru
+Qwen, verifies one judged `nango_list_connections` call, checks the exact
+five-plugin ready line and OTel output, then removes its container, temporary
+state, config, and credential file.
+
+Keep the three plugin repositories as siblings and run:
+
+```bash
+CLOUDRU_API_KEY=... npm run test:live:stack
+```
+
+Optional overrides: `OPENCLAW_IMAGE`, `FIVE_PLUGIN_A2A_PORT`,
+`FIVE_PLUGIN_GATEWAY_PORT`, `FIVE_PLUGIN_NANGO_PORT`, and
+`FIVE_PLUGIN_TIMEOUT_MS`.
+
 ### Tool approval (human-in-the-loop)
 
 When enabled, the plugin registers `before_tool_call` and **awaits** an A2A client decision before the tool runs (OpenClaw 2026.3.x has no `requireApproval` yet — we pause via an in-process Promise and return `{ block: true }` on deny/timeout).
