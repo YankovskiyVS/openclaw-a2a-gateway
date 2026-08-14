@@ -55,6 +55,8 @@ const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
 const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 360_000;
 const GATEWAY_CONNECT_TIMEOUT_MS = 10_000;
 const GATEWAY_REQUEST_TIMEOUT_MS = 10_000;
+// OpenClaw 2026.7.1-2 requires Gateway WebSocket protocol v4.
+const GATEWAY_PROTOCOL_VERSION = 4;
 const HOOKS_WAKE_TIMEOUT_MS = 5_000;
 const TASK_CONTEXT_CACHE_LIMIT = 10_000;
 const MODEL_ID_PREFIX = "cloudru/";
@@ -1389,8 +1391,8 @@ class GatewayRpcConnection {
     const scopes = ["operator.admin", "operator.read", "operator.write", "operator.approvals", "operator.pairing"];
 
     const params: Record<string, unknown> = {
-      minProtocol: 3,
-      maxProtocol: 3,
+      minProtocol: GATEWAY_PROTOCOL_VERSION,
+      maxProtocol: GATEWAY_PROTOCOL_VERSION,
       client: {
         id: "cli",
         version: "a2a-gateway-plugin",

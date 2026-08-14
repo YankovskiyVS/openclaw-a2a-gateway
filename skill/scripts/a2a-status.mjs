@@ -30,6 +30,7 @@ import {
   createAuthenticatingFetchWithRetry,
 } from "@a2a-js/sdk/client";
 import { GrpcTransportFactory } from "@a2a-js/sdk/client/grpc";
+import { extractTextParts, normalizeTaskState } from "./a2a-proto.mjs";
 import { resolveConnection } from "./a2a-peers.mjs";
 
 const USAGE = `Usage: node a2a-status.mjs --task-id <TASK_ID> [--peer <name> | --peer-url <URL>] [--token <TOKEN>] [--wait] [--timeout-ms <ms>] [--poll-ms <ms>] [--json] [--help]`;
@@ -63,14 +64,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function extractText(parts) {
-  if (!Array.isArray(parts)) return undefined;
-  for (const p of parts) {
-    if (p?.kind === "text" && typeof p.text === "string") return p.text;
-  }
-  return undefined;
-}
-
 const STATE_LABELS = {
   submitted: "⏳ submitted (queued)",
   working:   "⚙️  working",
@@ -81,9 +74,9 @@ const STATE_LABELS = {
 };
 
 function formatTask(task) {
-  const state = task?.status?.state || "unknown";
+  const state = normalizeTaskState(task?.status?.state);
   const label = STATE_LABELS[state] || state;
-  const text = extractText(task?.status?.message?.parts);
+  const text = extractTextParts(task?.status?.message?.parts);
   const ts = task?.status?.timestamp || "";
 
   let out = `[${label}] task=${task.id}`;
@@ -143,7 +136,7 @@ async function main() {
 
   // Single query mode
   if (!wait) {
-    const task = await client.getTask({ id: taskId, historyLength: 20 }, requestOptions);
+    const task = await client.getTask({ tenant: "", id: taskId, historyLength: 20 }, requestOptions);
     if (json) {
       console.log(JSON.stringify(task, null, 2));
     } else {
@@ -157,8 +150,8 @@ async function main() {
   let lastState = "";
 
   while (true) {
-    const task = await client.getTask({ id: taskId, historyLength: 20 }, requestOptions);
-    const state = task?.status?.state;
+    const task = await client.getTask({ tenant: "", id: taskId, historyLength: 20 }, requestOptions);
+    const state = normalizeTaskState(task?.status?.state);
 
     // Print state transitions
     if (state !== lastState) {

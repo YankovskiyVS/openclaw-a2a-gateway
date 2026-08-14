@@ -20,6 +20,7 @@
   "homepage": "https://github.com/win4r/openclaw-a2a-gateway#readme",
   "scripts": {
     "test": "node --import tsx --test tests/*.test.ts",
+    "test:live:a2a": "node scripts/live-a2a-long.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

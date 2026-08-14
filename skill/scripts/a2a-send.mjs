@@ -44,6 +44,16 @@ import { GrpcTransportFactory } from "@a2a-js/sdk/client/grpc";
 import { randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { extname } from "node:path";
+import {
+  Role,
+  extractTextParts,
+  isMessage,
+  isTask,
+  normalizeTaskState,
+  rawPart,
+  textPart,
+  urlPart,
+} from "./a2a-proto.mjs";
 import { resolveConnection } from "./a2a-peers.mjs";
 
 const USAGE = `Usage: node a2a-send.mjs [--peer <name> | --peer-url <URL>] --message <TEXT> [--file-uri <url>] [--file-path <localpath>] [--task-id <id>] [--context-id <id>] [--non-blocking] [--wait] [--stream] [--timeout-ms <ms>] [--poll-ms <ms>] [--agent-name <openclaw-agent-name>] [--agent-id <deprecated-alias>] [--help]`;
@@ -148,16 +158,6 @@ async function retryOnConnectionError(fn, { maxRetries = 3, baseDelayMs = 2000 }
   }
 }
 
-function extractFirstTextParts(parts) {
-  if (!Array.isArray(parts)) return undefined;
-  for (const p of parts) {
-    if (p && typeof p === "object" && p.kind === "text" && typeof p.text === "string") {
-      return p.text;
-    }
-  }
-  return undefined;
-}
-
 async function main() {
   const opts = parseArgs();
 
@@ -225,7 +225,7 @@ async function main() {
   // Build message parts: text + optional file
   const outboundParts = [];
   if (message) {
-    outboundParts.push({ kind: "text", text: message });
+    outboundParts.push(textPart(message));
   }
 
   const fileUri = opts.fileUri;
@@ -244,18 +244,11 @@ async function main() {
       process.exit(2);
     }
     const fileBuffer = readFileSync(filePath);
-    const base64 = fileBuffer.toString("base64");
     const name = filePath.split("/").pop() || "file";
-    outboundParts.push({
-      kind: "file",
-      file: { bytes: base64, mimeType, name },
-    });
+    outboundParts.push(rawPart(fileBuffer, mimeType, name));
   } else if (fileUri) {
     // URI-based file reference
-    outboundParts.push({
-      kind: "file",
-      file: { uri: fileUri },
-    });
+    outboundParts.push(urlPart(fileUri));
   }
 
   if (outboundParts.length === 0) {
@@ -264,20 +257,27 @@ async function main() {
   }
 
   const outboundMessage = {
-    kind: "message",
     messageId: randomUUID(),
-    role: "user",
+    role: Role.ROLE_USER,
     parts: outboundParts,
-    ...(continuationTaskId ? { taskId: continuationTaskId } : {}),
-    ...(continuationContextId ? { contextId: continuationContextId } : {}),
-    ...(targetAgentName ? { agentName: targetAgentName } : {}),
+    taskId: continuationTaskId,
+    contextId: continuationContextId,
+    metadata: targetAgentName ? { agentName: targetAgentName } : undefined,
+    extensions: [],
+    referenceTaskIds: [],
   };
 
   const requestOptions = token ? { serviceParameters: { authorization: `Bearer ${token}` } } : undefined;
 
   const sendParams = {
+    tenant: "",
     message: outboundMessage,
-    ...(nonBlocking ? { configuration: { blocking: false } } : {}),
+    configuration: {
+      acceptedOutputModes: ["text"],
+      taskPushNotificationConfig: undefined,
+      returnImmediately: nonBlocking,
+    },
+    metadata: undefined,
   };
 
   // SSE streaming mode: subscribe to task event stream
@@ -286,11 +286,12 @@ async function main() {
     // Note: stream mode does not auto-retry — connection errors surface immediately.
     // Retrying a partially-consumed stream has different semantics than retrying a single RPC.
     const eventStream = client.sendMessageStream(sendParams, requestOptions);
-    for await (const event of eventStream) {
-      const kind = event?.kind;
+    for await (const streamEvent of eventStream) {
+      const event = streamEvent?.payload?.value || streamEvent;
+      const kind = streamEvent?.payload?.$case || event?.kind;
       if (kind === "task") {
-        const state = event.status?.state;
-        const text = extractFirstTextParts(event.status?.message?.parts);
+        const state = normalizeTaskState(event.status?.state);
+        const text = extractTextParts(event.status?.message?.parts);
         if (state === "working") {
           console.log(`[stream] working... (${event.status?.timestamp || ""})`);
         } else if (text) {
@@ -299,8 +300,8 @@ async function main() {
           console.log(`[stream] ${state}: ${JSON.stringify(event.status)}`);
         }
       } else if (kind === "status-update") {
-        const state = event.status?.state;
-        const text = extractFirstTextParts(event.status?.message?.parts);
+        const state = normalizeTaskState(event.status?.state);
+        const text = extractTextParts(event.status?.message?.parts);
         console.log(`[stream] status-update: ${state}${text ? ` — ${text}` : ""}`);
       } else {
         console.log(`[stream] ${kind || "unknown"}: ${JSON.stringify(event)}`);
@@ -327,14 +328,14 @@ async function main() {
 
   // If the user didn't request waiting, print the immediate response.
   if (!nonBlocking || !wait) {
-    if (result?.kind === "message") {
-      const text = extractFirstTextParts(result.parts);
+    if (isMessage(result)) {
+      const text = extractTextParts(result.parts);
       console.log(text || JSON.stringify(result, null, 2));
       return;
     }
-    if (result?.kind === "task") {
+    if (isTask(result)) {
       printTaskHandle(result);
-      const text = extractFirstTextParts(result.status?.message?.parts);
+      const text = extractTextParts(result.status?.message?.parts);
       console.log(text || JSON.stringify(result, null, 2));
       return;
     }
@@ -343,14 +344,14 @@ async function main() {
   }
 
   // Async task mode: wait for terminal task state via tasks/get.
-  const responseTaskId = result?.kind === "task" ? result.id : result?.taskId;
+  const responseTaskId = isTask(result) ? result.id : result?.taskId;
   if (!responseTaskId || typeof responseTaskId !== "string") {
     // Can't wait if we don't know the task id.
     console.log(JSON.stringify(result, null, 2));
     return;
   }
 
-  if (result?.kind === "task") {
+  if (isTask(result)) {
     printTaskHandle(result);
   }
 
@@ -359,11 +360,11 @@ async function main() {
   const blockedStates = new Set(["input-required", "auth-required"]);
 
   while (true) {
-    const task = await client.getTask({ id: responseTaskId, historyLength: 20 }, requestOptions);
-    const state = task?.status?.state;
+    const task = await client.getTask({ tenant: "", id: responseTaskId, historyLength: 20 }, requestOptions);
+    const state = normalizeTaskState(task?.status?.state);
 
     if (state && terminalStates.has(state)) {
-      const text = extractFirstTextParts(task.status?.message?.parts);
+      const text = extractTextParts(task.status?.message?.parts);
       console.log(text || JSON.stringify(task, null, 2));
       return;
     }
@@ -377,7 +378,7 @@ async function main() {
 
     if (Date.now() - startedAt > timeoutMs) {
       const elapsed = (timeoutMs / 1000).toFixed(0);
-      const lastState = task?.status?.state || "unknown";
+      const lastState = normalizeTaskState(task?.status?.state);
       console.error(`\nTimeout: task ${responseTaskId} still "${lastState}" after ${elapsed}s`);
       console.error(`Tip: increase --timeout-ms or check status later with:`);
       console.error(`  node a2a-status.mjs --task-id ${responseTaskId} --wait`);

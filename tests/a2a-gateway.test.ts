@@ -1147,10 +1147,12 @@ describe("scope verification on connect (issue #54)", () => {
   it("does not trigger fallback when scopes include operator.write", async () => {
     const api = createApi();
     let connectAttempts = 0;
+    let connectParams: Record<string, unknown> | undefined;
 
     const MockWS = createMockWebSocketClass({
-      onConnect: () => {
+      onConnect: (params) => {
         connectAttempts++;
+        connectParams = params;
         // Always return full scopes — no fallback needed
         return { scopes: ["operator.admin", "operator.read", "operator.write"] };
       },
@@ -1181,6 +1183,8 @@ describe("scope verification on connect (issue #54)", () => {
 
       // Should have connected only once — no reconnect needed
       assert.equal(connectAttempts, 1, "should connect only once when scopes are fine");
+      assert.equal(connectParams?.minProtocol, 4, "should use OpenClaw Gateway protocol v4 minimum");
+      assert.equal(connectParams?.maxProtocol, 4, "should use OpenClaw Gateway protocol v4 maximum");
     } finally {
       (globalThis as any).WebSocket = originalWebSocket;
     }
