@@ -196,6 +196,14 @@ export class ToolApprovalBridge {
     return this.streamsByRunId.size;
   }
 
+  pendingApprovalCount(): number {
+    return this.pendingByApprovalId.size;
+  }
+
+  reservedActionCount(): number {
+    return this.executionByActionHash.size;
+  }
+
   shouldRequireApproval(toolName: string, params: Record<string, unknown>, tools?: string[]): boolean {
     const capability = classifyToolCapability(toolName, params);
     if (!capability.requiresApproval) return false;

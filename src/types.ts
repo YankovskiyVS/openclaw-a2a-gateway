@@ -110,6 +110,8 @@ export interface GatewayConfig {
     grpcEnabled: boolean;
   };
   storage: {
+    /** Operator-only persistence mode. Durable is the production default. */
+    mode: "durable" | "memory";
     tasksDir: string;
     taskTtlHours: number;
     cleanupIntervalMinutes: number;

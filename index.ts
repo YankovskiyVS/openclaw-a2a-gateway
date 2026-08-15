@@ -30,7 +30,7 @@ import { OpenClawAgentExecutor } from "./src/executor.js";
 import { QueueingAgentExecutor } from "./src/queueing-executor.js";
 import { runTaskCleanup } from "./src/task-cleanup.js";
 import { recoverStaleTasks } from "./src/task-recovery.js";
-import { FileTaskStore } from "./src/task-store.js";
+import { FileTaskStore, MemoryTaskStore } from "./src/task-store.js";
 import { GatewayTelemetry } from "./src/telemetry.js";
 import { AuditLogger } from "./src/audit.js";
 import { PeerHealthManager } from "./src/peer-health.js";
@@ -443,6 +443,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
       grpcEnabled: server.grpcEnabled === true,
     },
     storage: {
+      mode: asString(storage.mode, "durable") === "memory" ? "memory" : "durable",
       tasksDir: resolveConfiguredPath(
         storage.tasksDir,
         path.join(os.homedir(), ".openclaw", "a2a-tasks"),
@@ -524,7 +525,11 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
       structuredLogs: asBoolean(observability.structuredLogs, true),
       exposeMetricsEndpoint: asBoolean(observability.exposeMetricsEndpoint, true),
       metricsPath: normalizeHttpPath(asString(observability.metricsPath, "/a2a/metrics"), "/a2a/metrics"),
-      metricsAuth: (asString(observability.metricsAuth, "none") === "bearer" ? "bearer" : "none") as "none" | "bearer",
+      metricsAuth: (asString(observability.metricsAuth, "") === "none"
+        ? "none"
+        : asString(observability.metricsAuth, "") === "bearer" || inboundAuth === "bearer"
+          ? "bearer"
+          : "none") as "none" | "bearer",
       auditLogPath: resolveConfiguredPath(
         observability.auditLogPath,
         path.join(os.homedir(), ".openclaw", "a2a-audit.jsonl"),
@@ -591,13 +596,22 @@ const plugin = {
     const config = parseConfig(api.pluginConfig, api.resolvePath?.bind(api));
     const telemetry = new GatewayTelemetry(api.logger, {
       structuredLogs: config.observability.structuredLogs,
+      storageMode: config.storage.mode,
+      metricsEndpointEnabled: config.observability.exposeMetricsEndpoint,
     });
+    telemetry.setApprovalStateProvider(() => ({
+      activeStreams: toolApprovalBridge.activeStreamCount(),
+      pendingApprovals: toolApprovalBridge.pendingApprovalCount(),
+      reservedActions: toolApprovalBridge.reservedActionCount(),
+    }));
     const auditLogger = new AuditLogger(config.observability.auditLogPath);
     const pushStore = new PushNotificationStore();
     const client = new A2AClient({
       requestTimeoutMs: config.timeouts?.peerRequestTimeoutMs,
     });
-    const taskStore = new FileTaskStore(config.storage.tasksDir);
+    const taskStore = config.storage.mode === "memory"
+      ? new MemoryTaskStore()
+      : new FileTaskStore(config.storage.tasksDir);
     const executor = new QueueingAgentExecutor(
       new OpenClawAgentExecutor(api, config),
       telemetry,
@@ -941,7 +955,11 @@ const plugin = {
         config.observability.metricsPath,
         createHttpMetricsMiddleware("metrics"),
         (req, res, next) => {
-          if (config.observability.metricsAuth === "bearer" && config.security.validTokens.size > 0) {
+          if (config.observability.metricsAuth === "bearer") {
+            if (config.security.validTokens.size === 0) {
+              res.status(503).json({ error: "Metrics bearer authentication is not configured" });
+              return;
+            }
             const authHeader = req.headers.authorization;
             const header = Array.isArray(authHeader) ? authHeader[0] : authHeader;
             const token = typeof header === "string" && header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -1294,8 +1312,14 @@ const plugin = {
               `a2a-gateway: HTTP listening on ${config.server.host}:${config.server.port}`
             );
             api.logger.info(
-              `a2a-gateway: durable task store at ${config.storage.tasksDir}; concurrency=${config.limits.maxConcurrentTasks}; queue=${config.limits.maxQueuedTasks}`
+              "a2a-gateway: task store mode=" + config.storage.mode
+                + (config.storage.mode === "durable" ? " path=" + config.storage.tasksDir : " volatile=true")
+                + "; concurrency=" + config.limits.maxConcurrentTasks
+                + "; queue=" + config.limits.maxQueuedTasks,
             );
+            if (config.storage.mode === "memory") {
+              api.logger.warn("a2a-gateway: storage.mode=memory is volatile and not production-safe");
+            }
             resolve();
           });
 
@@ -1371,7 +1395,9 @@ const plugin = {
         }
 
         // Recover tasks stuck in non-terminal states from a previous run
-        await recoverStaleTasks(taskStore, api.logger);
+        if (config.storage.mode === "durable") {
+          await recoverStaleTasks(taskStore, api.logger);
+        }
 
         // Start task TTL cleanup
         const ttlMs = config.storage.taskTtlHours * 3_600_000;
@@ -1388,11 +1414,13 @@ const plugin = {
         api.logger.info(
           `a2a-gateway: task cleanup enabled — ttl=${config.storage.taskTtlHours}h interval=${config.storage.cleanupIntervalMinutes}min`,
         );
+        telemetry.setServiceState("ready");
 
         // Start mDNS self-advertisement (after HTTP is listening)
         mdnsResponder?.start();
       },
       async stop(_ctx) {
+        telemetry.setServiceState("stopping");
         // Stop mDNS self-advertisement (sends goodbye packet)
         mdnsResponder?.stop();
 

@@ -51,6 +51,18 @@ describe("cross-platform tasksDir default (issue #25)", () => {
     );
     assert.equal(config.storage.tasksDir, "/plugin-root/my/tasks");
   });
+
+  it("defaults to operator-controlled durable storage", () => {
+    assert.equal(parseConfig({}).storage.mode, "durable");
+  });
+
+  it("allows an operator to select volatile memory mode", () => {
+    assert.equal(parseConfig({ storage: { mode: "memory" } }).storage.mode, "memory");
+  });
+
+  it("falls back to durable for an unknown mode", () => {
+    assert.equal(parseConfig({ storage: { mode: "request-metadata" } }).storage.mode, "durable");
+  });
 });
 
 describe("cross-platform auditLogPath default", () => {
@@ -79,6 +91,21 @@ describe("cross-platform auditLogPath default", () => {
       config.observability.auditLogPath.endsWith("data/audit.jsonl"),
       `should end with "data/audit.jsonl" but got "${config.observability.auditLogPath}"`,
     );
+  });
+});
+
+describe("operator metrics authentication", () => {
+  it("inherits bearer protection from inbound auth by default", () => {
+    const config = parseConfig({ security: { inboundAuth: "bearer", token: "operator-token" } });
+    assert.equal(config.observability.metricsAuth, "bearer");
+  });
+
+  it("allows an explicit operator-only none override", () => {
+    const config = parseConfig({
+      security: { inboundAuth: "bearer", token: "operator-token" },
+      observability: { metricsAuth: "none" },
+    });
+    assert.equal(config.observability.metricsAuth, "none");
   });
 });
 

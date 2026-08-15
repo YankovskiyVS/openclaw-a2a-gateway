@@ -63,6 +63,12 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["durable", "memory"],
+            "default": "durable",
+            "description": "Operator-only persistence mode. durable is required for production; memory is volatile dev/test mode and cannot be overridden by A2A requests."
+          },
           "tasksDir": { "type": "string", "default": "~/.openclaw/a2a-tasks" },
           "taskTtlHours": {
             "type": "number",
@@ -251,9 +257,9 @@
           },
           "metricsAuth": {
             "type": "string",
-            "enum": ["none", "bearer"],
-            "default": "none",
-            "description": "Authentication for the metrics endpoint. When set to 'bearer', reuses security.token/tokens."
+            "enum": ["inherit", "none", "bearer"],
+            "default": "inherit",
+            "description": "Operator-only metrics authentication. inherit follows security.inboundAuth; bearer fails closed when no token is configured."
           },
           "auditLogPath": {
             "type": "string",

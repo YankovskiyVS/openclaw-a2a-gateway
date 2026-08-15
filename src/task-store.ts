@@ -13,6 +13,7 @@ function taskFileName(taskId: string): string {
 }
 
 export class FileTaskStore implements TaskStore {
+  readonly mode: "durable" | "memory" = "durable";
   private readonly tasksDir: string;
   private dirReady: Promise<void> | null = null;
 
@@ -177,5 +178,32 @@ export class FileTaskStore implements TaskStore {
       );
     }
     return this.dirReady;
+  }
+}
+
+/** Volatile operator-selected store for development and tests. */
+export class MemoryTaskStore extends FileTaskStore {
+  override readonly mode: "durable" | "memory" = "memory";
+  private readonly memory = new Map<string, Task>();
+
+  constructor() {
+    super(".");
+  }
+
+  override async load(taskId: string, _context?: ServerCallContext): Promise<Task | undefined> {
+    const task = this.memory.get(taskId);
+    return task ? cloneTask(task) : undefined;
+  }
+
+  override async save(task: Task, _context?: ServerCallContext): Promise<void> {
+    this.memory.set(task.id, cloneTask(task));
+  }
+
+  override async listAll(): Promise<string[]> {
+    return [...this.memory.keys()].sort();
+  }
+
+  override async delete(taskId: string): Promise<boolean> {
+    return this.memory.delete(taskId);
   }
 }

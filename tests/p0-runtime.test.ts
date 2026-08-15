@@ -10,7 +10,7 @@ import type { AgentExecutor, ExecutionEventBus } from "@a2a-js/sdk/server";
 import { AgentEvent } from "@a2a-js/sdk/server";
 
 import { QueueingAgentExecutor } from "../src/queueing-executor.js";
-import { FileTaskStore } from "../src/task-store.js";
+import { FileTaskStore, MemoryTaskStore } from "../src/task-store.js";
 import { GatewayTelemetry } from "../src/telemetry.js";
 
 import { executionTaskState, partTextFromJson, silentLogger } from "./helpers.js";
@@ -113,6 +113,39 @@ describe("P0 runtime components", () => {
     } finally {
       await rm(tasksDir, { recursive: true, force: true });
     }
+  });
+
+  it("MemoryTaskStore is volatile but preserves TaskStore semantics within one process", async () => {
+    const store = new MemoryTaskStore();
+    await store.save(makeTask("memory-task"));
+    const loaded = await store.load("memory-task");
+    assert.equal(store.mode, "memory");
+    assert.equal(loaded?.id, "memory-task");
+    assert.deepEqual(await store.listAll(), ["memory-task"]);
+    assert.equal(await store.delete("memory-task"), true);
+    assert.equal(await store.load("memory-task"), undefined);
+    assert.equal(await new MemoryTaskStore().load("memory-task"), undefined);
+  });
+
+  it("reports volatile memory mode in operator telemetry", () => {
+    const telemetry = new GatewayTelemetry(silentLogger(), {
+      structuredLogs: false,
+      storageMode: "memory",
+      metricsEndpointEnabled: false,
+    });
+    telemetry.setApprovalStateProvider(() => ({
+      activeStreams: 2,
+      pendingApprovals: 3,
+      reservedActions: 4,
+    }));
+    const runtime = telemetry.snapshot().runtime;
+    assert.equal(runtime.storage_mode, "memory");
+    assert.equal(runtime.persistence_enabled, false);
+    assert.equal(runtime.multi_replica_safe, false);
+    assert.equal(runtime.metrics_endpoint_enabled, false);
+    assert.equal(runtime.active_approval_streams, 2);
+    assert.equal(runtime.pending_approvals, 3);
+    assert.equal(runtime.reserved_actions, 4);
   });
 
   it("QueueingAgentExecutor queues overflow within the same session", async () => {

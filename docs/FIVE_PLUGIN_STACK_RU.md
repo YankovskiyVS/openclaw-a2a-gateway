@@ -176,6 +176,7 @@ A2A_TOKEN=<random-bearer-token>
             "grpcEnabled": false
           },
           "storage": {
+            "mode": "durable",
             "tasksDir": "/var/lib/openclaw/a2a-tasks",
             "taskTtlHours": 72,
             "cleanupIntervalMinutes": 60
@@ -183,6 +184,12 @@ A2A_TOKEN=<random-bearer-token>
           "routing": {
             "defaultAgentId": "main",
             "rules": []
+          },
+          "observability": {
+            "structuredLogs": true,
+            "exposeMetricsEndpoint": true,
+            "metricsPath": "/a2a/metrics",
+            "metricsAuth": "inherit"
           },
           "security": {
             "inboundAuth": "bearer",
@@ -239,6 +246,21 @@ A2A_TOKEN=<random-bearer-token>
   }
 }
 ```
+
+### Operator storage и метрики
+
+`storage.mode` задаётся только в конфигурации плагина: `durable` — production
+(каталог должен быть на PVC), `memory` — только dev/test. Поля входящего A2A
+`Message`, metadata и prompt не могут менять storage, metrics, лимиты или policy.
+
+`/a2a/metrics` отдаёт только агрегированные runtime/task/queue/peer показатели.
+В production используется `metricsAuth=inherit`, поэтому endpoint наследует bearer
+защиту `security.token`. Если bearer выбран без токена, endpoint отвечает 503.
+
+Файловое durable-хранилище рассчитано на один экземпляр gateway: для нескольких
+реплик потребуется внешний shared store с lease/fencing; endpoint явно сообщает
+`multi_replica_safe=false`.
+
 
 ### Почему A2A tool approval включён
 

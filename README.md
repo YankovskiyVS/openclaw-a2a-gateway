@@ -451,9 +451,18 @@ node <PLUGIN_PATH>/skill/scripts/a2a-send.mjs \
 | `agentCard.skills` | array | `[{chat}]` | List of skills this agent offers |
 | `server.host` | string | `0.0.0.0` | Bind address |
 | `server.port` | number | `18800` | A2A HTTP port (gRPC on port+1) |
-| `storage.tasksDir` | string | `~/.openclaw/a2a-tasks` | Durable on-disk task store path |
+| `storage.mode` | string | `durable` | Operator-only: `durable` for production or volatile `memory` for dev/test; A2A requests cannot override it |
+| `storage.tasksDir` | string | `~/.openclaw/a2a-tasks` | On-disk task store path for `storage.mode=durable`; mount a PVC in Kubernetes |
 | `storage.taskTtlHours` | number | `72` | Auto-cleanup expired tasks after N hours |
 | `storage.cleanupIntervalMinutes` | number | `60` | How often to scan for expired tasks |
+
+Operator boundary: storage, observability, limits, and policy are read only from
+the OpenClaw plugin configuration at startup. Inbound A2A `Message`, metadata,
+and prompts cannot override them. Metrics are aggregate and never include prompts,
+tool arguments, message bodies, recipients, or file contents. `durable` provides
+restart persistence only when `tasksDir` is mounted on persistent storage; the
+filesystem store is intended for a single gateway replica and does not provide
+cross-replica locking.
 
 ### Peers
 
@@ -592,7 +601,7 @@ Aliases: `metadata.abort`, `metadata.stop` (boolean or object). The gateway look
 | `observability.structuredLogs` | boolean | `true` | Emit JSON structured logs |
 | `observability.exposeMetricsEndpoint` | boolean | `true` | Expose telemetry snapshot over HTTP |
 | `observability.metricsPath` | string | `/a2a/metrics` | HTTP path for telemetry |
-| `observability.metricsAuth` | string | `none` | `none` or `bearer` for metrics endpoint |
+| `observability.metricsAuth` | string | `inherit` | Operator-only: inherit inbound auth, or explicit `none`/`bearer`; bearer fails closed without tokens |
 | `observability.auditLogPath` | string | `~/.openclaw/a2a-audit.jsonl` | Path for JSONL audit log |
 | `timeouts.agentResponseTimeoutMs` | number | `300000` | Max wait for agent response (ms) |
 | `timeouts.peerRequestTimeoutMs` | number | `30000` | Max wait for Agent Card discovery and each outbound peer request (ms) |

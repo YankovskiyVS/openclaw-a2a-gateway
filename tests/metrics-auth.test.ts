@@ -30,7 +30,7 @@ function makeConfig(port: number, overrides: Record<string, unknown> = {}) {
 }
 
 describe("metrics endpoint auth", () => {
-  it("returns metrics without auth when metricsAuth is none (default)", async () => {
+  it("returns aggregate runtime metrics when operator explicitly disables metrics auth", async () => {
     const port = 19100 + Math.floor(Math.random() * 100);
     const originalWebSocket = (globalThis as any).WebSocket;
     (globalThis as any).WebSocket = createMockWebSocketClass();
@@ -46,6 +46,11 @@ describe("metrics endpoint auth", () => {
       assert.equal(res.status, 200);
       const body = await res.json();
       assert(typeof body === "object" && body !== null, "should return metrics object");
+      const runtime = (body as { runtime?: Record<string, unknown> }).runtime;
+      assert.equal(runtime?.storage_mode, "durable");
+      assert.equal(runtime?.persistence_enabled, true);
+      assert.equal(runtime?.service_state, "ready");
+      assert.equal(runtime?.metrics_endpoint_enabled, true);
 
       await service.stop();
     } finally {
@@ -97,6 +102,25 @@ describe("metrics endpoint auth", () => {
     }
   });
 
+
+  it("fails closed when bearer metrics auth has no configured token", async () => {
+    const port = 19500 + Math.floor(Math.random() * 100);
+    const originalWebSocket = (globalThis as any).WebSocket;
+    (globalThis as any).WebSocket = createMockWebSocketClass();
+    try {
+      const { service } = registerPlugin(makeConfig(port, {
+        security: { inboundAuth: "none" },
+        observability: { metricsAuth: "bearer" },
+      }));
+      assert(service, "service should be registered");
+      await service.start();
+      const res = await fetch(`http://127.0.0.1:${port}/a2a/metrics`);
+      assert.equal(res.status, 503);
+      await service.stop();
+    } finally {
+      (globalThis as any).WebSocket = originalWebSocket;
+    }
+  });
   it("accepts metrics request with valid token when metricsAuth is bearer", async () => {
     const port = 19400 + Math.floor(Math.random() * 100);
     const originalWebSocket = (globalThis as any).WebSocket;

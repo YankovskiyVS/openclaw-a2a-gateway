@@ -10,6 +10,7 @@ export type PeerStateProvider = () => Map<string, PeerState>;
 
 /** Callback for audit logging on task completion. */
 export type TaskAuditCallback = (taskId: string, contextId: string, state: string, durationMs: number) => void;
+export type ApprovalStateProvider = () => { activeStreams: number; pendingApprovals: number; reservedActions: number };
 
 interface HttpMetrics {
   requests_total: number;
@@ -50,21 +51,36 @@ interface PeerMetrics {
   last_check_at?: string;
 }
 
+interface RuntimeMetrics {
+  service_state: "starting" | "ready" | "stopping";
+  storage_mode: "durable" | "memory";
+  persistence_enabled: boolean;
+  multi_replica_safe: boolean;
+  metrics_endpoint_enabled: boolean;
+  active_approval_streams: number;
+  pending_approvals: number;
+  reserved_actions: number;
+}
+
 export interface GatewayTelemetrySnapshot {
   protocol: ReturnType<A2AMetricsCollector["getMetrics"]>;
   http: HttpMetrics;
   tasks: TaskMetrics & { average_duration_ms: number };
   peers: Record<string, PeerMetrics>;
+  runtime: RuntimeMetrics;
 }
 
 export interface GatewayTelemetryOptions {
   structuredLogs?: boolean;
+  storageMode?: "durable" | "memory";
+  metricsEndpointEnabled?: boolean;
 }
 
 export class GatewayTelemetry {
   private readonly collector = new A2AMetricsCollector();
   private readonly logger: LoggerLike;
   private readonly structuredLogs: boolean;
+  private readonly runtime: RuntimeMetrics;
   private readonly http: HttpMetrics = {
     requests_total: 0,
     jsonrpc_requests: 0,
@@ -94,15 +110,35 @@ export class GatewayTelemetry {
   private readonly peerRetries: Record<string, number> = {};
   private peerStateProvider: PeerStateProvider | null = null;
   private taskAuditCallback: TaskAuditCallback | null = null;
+  private approvalStateProvider: ApprovalStateProvider | null = null;
 
   constructor(logger: LoggerLike, options: GatewayTelemetryOptions = {}) {
     this.logger = logger;
     this.structuredLogs = options.structuredLogs !== false;
+    const storageMode = options.storageMode === "memory" ? "memory" : "durable";
+    this.runtime = {
+      service_state: "starting",
+      storage_mode: storageMode,
+      persistence_enabled: storageMode === "durable",
+      multi_replica_safe: false,
+      metrics_endpoint_enabled: options.metricsEndpointEnabled === true,
+      active_approval_streams: 0,
+      pending_approvals: 0,
+      reserved_actions: 0,
+    };
+  }
+
+  setServiceState(state: RuntimeMetrics["service_state"]): void {
+    this.runtime.service_state = state;
   }
 
   /** Register a callback to retrieve peer health states for the metrics snapshot. */
   setPeerStateProvider(provider: PeerStateProvider): void {
     this.peerStateProvider = provider;
+  }
+
+  setApprovalStateProvider(provider: ApprovalStateProvider): void {
+    this.approvalStateProvider = provider;
   }
 
   /** Register a callback for audit logging on task completion. */
@@ -290,6 +326,17 @@ export class GatewayTelemetry {
       }
     }
 
+    if (this.approvalStateProvider) {
+      try {
+        const approval = this.approvalStateProvider();
+        this.runtime.active_approval_streams = Math.max(0, approval.activeStreams);
+        this.runtime.pending_approvals = Math.max(0, approval.pendingApprovals);
+        this.runtime.reserved_actions = Math.max(0, approval.reservedActions);
+      } catch {
+        // Metrics must remain available if an optional provider fails.
+      }
+    }
+
     return {
       protocol: this.collector.getMetrics(),
       http: { ...this.http },
@@ -298,6 +345,7 @@ export class GatewayTelemetry {
         average_duration_ms: averageDuration,
       },
       peers,
+      runtime: { ...this.runtime },
     };
   }
 

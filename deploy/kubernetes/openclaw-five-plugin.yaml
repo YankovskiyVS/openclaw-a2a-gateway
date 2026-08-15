@@ -124,6 +124,7 @@ data:
                 "grpcEnabled": false
               },
               "storage": {
+                "mode": "durable",
                 "tasksDir": "/state/a2a-tasks",
                 "taskTtlHours": 72,
                 "cleanupIntervalMinutes": 60
@@ -135,6 +136,12 @@ data:
               "limits": {
                 "maxConcurrentTasks": 1,
                 "maxQueuedTasks": 100
+              },
+              "observability": {
+                "structuredLogs": true,
+                "exposeMetricsEndpoint": true,
+                "metricsPath": "/a2a/metrics",
+                "metricsAuth": "inherit"
               },
               "security": {
                 "inboundAuth": "bearer",
