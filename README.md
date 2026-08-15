@@ -10,7 +10,9 @@
 A production-ready [OpenClaw](https://github.com/openclaw/openclaw) plugin that implements the [A2A (Agent-to-Agent) v1.0 protocol](https://github.com/a2aproject/A2A), with legacy v0.3 JSON-RPC message/send compatibility. It enables OpenClaw agents to discover and communicate with each other across servers — with zero-config install and automatic peer discovery.
 
 > Running OpenClaw 2026.7.1-2 with A2A, Browser, OTel Diagnostics, LLM Action
-> Judge, and Nango? See the [five-plugin integration guide (Russian)](docs/FIVE_PLUGIN_STACK_RU.md).
+> Judge, and Nango? See the [five-plugin integration guide (Russian)](docs/FIVE_PLUGIN_STACK_RU.md)
+> or deploy the tested
+> [Kubernetes manifest with 1:3 requests/limits](deploy/kubernetes/openclaw-five-plugin.yaml).
 
 **The only A2A gateway with adaptive, bio-inspired routing, discovery, and resilience — designed for multi-agent ecosystems at scale.**
 
@@ -519,16 +521,17 @@ When enabled, the plugin registers `before_tool_call` and **awaits** an A2A clie
 | Path | Type | Default | Description |
 |------|------|---------|-------------|
 | `toolApproval.enabled` | boolean | `true` | Pause agent turn before tool calls |
-| `toolApproval.tools` | string[] | all tools | Only these tool names require approval (e.g. `["exec"]`) |
-| `toolApproval.timeoutMs` | number | `120000` | Deny if no decision arrives in time |
+| `toolApproval.tools` | string[] | legacy compatibility | Registry is authoritative: passive tools never require mutation approval; risky/unknown tools cannot bypass approval by omission. |
+| `toolApproval.timeoutMs` | number | `120000` | Return typed approval timeout without executing the mutation |
 
 Resume contract (same as BFF `SendToolApproval`): send an A2A message with empty text and
 
 ```json
-{ "metadata": { "toolApproval": { "approvalId": "<id>", "callId": "<optional>", "decision": "allow-once" } } }
+{ "metadata": { "toolApproval": { "approvalId": "<id>", "callId": "<optional>", "actionHash": "sha256:<...>", "decision": "allow-once" } } }
 ```
 
-`decision`: `allow-once` | `allow-always` | `deny`. Keep `timeouts.agentResponseTimeoutMs` greater than `toolApproval.timeoutMs`.
+`decision`: `allow-once` | `allow-session` | `allow-always` (legacy alias) | `deny`. Session approval is bound to the exact `actionHash`; changed parameters require a new approval. Without an active A2A surface, risky tools return `approval_unavailable`.
+Keep `timeouts.agentResponseTimeoutMs` greater than `toolApproval.timeoutMs`.
 
 ### Interrupt / stop agent run
 

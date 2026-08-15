@@ -189,7 +189,8 @@ A2A_TOKEN=<random-bearer-token>
             "token": "${A2A_TOKEN}"
           },
           "toolApproval": {
-            "enabled": false
+            "enabled": true,
+            "timeoutMs": 120000
           }
         }
       },
@@ -205,8 +206,8 @@ A2A_TOKEN=<random-bearer-token>
           "allowConversationAccess": true
         },
         "config": {
-          "mode": "autonomous",
-          "enforcement": "shadow"
+          "mode": "supervised",
+          "enforcement": "enforce"
         }
       },
       "nango-proxy": {
@@ -239,16 +240,18 @@ A2A_TOKEN=<random-bearer-token>
 }
 ```
 
-### Почему A2A tool approval выключен
+### Почему A2A tool approval включён
 
-В проверенном стеке `a2a-gateway.config.toolApproval.enabled=false`, поскольку
-все proposed tool calls уже проверяет глобальный `llm-action-judge`. При
-одновременном включении A2A HITL появится второй независимый approval, для
-которого A2A-клиент должен отправлять решение.
+В рабочем стеке `a2a-gateway.config.toolApproval.enabled=true`,
+`OPENCLAW_JUDGE_PROFILE=supervised` и
+`OPENCLAW_JUDGE_A2A_HITL_REPLACE=false`. Judge разрешает proven-passive calls,
+блокирует policy deny и передаёт review/technical failure в один native A2A
+pending approval. Mutation без доступной approval surface завершается
+`approval_unavailable`, а не silent allow/deny.
 
-Для первого запуска используйте `enforcement=shadow`: Judge оценивает и пишет
-audit, но не блокирует действия. После анализа audit можно включить
-`enforcement=enforce` и выбрать `mode=supervised` либо `autonomous`.
+Approval связан с `userTurnId + toolName + normalized params + session/context`
+через `actionHash`; изменение адресата/контента требует нового решения, а retry
+точного actionHash не запускает side effect повторно.
 
 ## 4. Docker paths и порты
 
@@ -321,6 +324,57 @@ Smoke-тест поднимает отдельный OpenClaw-контейнер
 
 Mock проверяет контракт Nango plugin. Реальные OAuth connections проверяются
 отдельно через production `nango_list_connections`.
+
+## 7. Kubernetes: профиль ресурсов 1:3
+
+Готовый манифест:
+[deploy/kubernetes/openclaw-five-plugin.yaml](../deploy/kubernetes/openclaw-five-plugin.yaml).
+
+Для основного контейнера заданы одинаковые отношения `requests:limits = 1:3`:
+
+| Ресурс | Request | Limit |
+|---|---:|---:|
+| CPU | `167m` | `501m` |
+| RAM | `512Mi` | `1536Mi` |
+| Ephemeral storage | `1Gi` | `3Gi` |
+
+Init-контейнер использует `250m/750m`, `512Mi/1536Mi` и `1Gi/3Gi`.
+Он последовательно скачивает три fork-репозитория по закреплённым commit SHA и
+устанавливает только runtime dependencies. Образы Node и OpenClaw также
+закреплены по digest. Для состояния A2A, cron и writable-копии config создаётся
+PVC `5Gi`; Chromium получает отдельный `/dev/shm` размером `256Mi`.
+
+Перед применением сделайте приватную рабочую копию YAML и замените:
+
+- четыре placeholder в Secret;
+- `EVOLUTION_PROJECT_ID` и `EVOCLAW_ID`;
+- `NANGO_PROXY_URL`, если Nango работает не по указанному cluster DNS;
+- `agentCard.url` на публичный URL, если A2A вызывают вне кластера.
+
+Не сохраняйте рабочую копию с ключами в Git. Затем выполните:
+
+```bash
+kubectl apply -f /secure/path/openclaw-five-plugin.yaml
+kubectl -n openclaw rollout status deployment/openclaw-five-plugin --timeout=5m
+kubectl -n openclaw logs -f deployment/openclaw-five-plugin
+```
+
+Для локальной проверки без Ingress:
+
+```bash
+kubectl -n openclaw port-forward service/openclaw-five-plugin 18800:18800 19080:19080
+curl --fail http://127.0.0.1:18800/.well-known/agent-card.json
+```
+
+Кластеру нужны default StorageClass и исходящий HTTPS-доступ к GitHub, GHCR,
+Cloud.ru и Nango. Deployment использует `Recreate` и одну реплику, потому что
+task store находится на `ReadWriteOnce` PVC.
+
+Профиль проверен на browser-образе OpenClaw: все пять плагинов вышли в
+`ready` за 3.6 секунды, Agent Card вернул HTTP 200, idle RAM составила
+около `396Mi`, а короткий Playwright/Chromium test завершился успешно.
+Ранее реальный A2A → Cloud.ru Qwen → Judge → Nango проходил на `0.25 CPU /
+1GiB` с пиком около `790MiB`; limit `1536Mi` оставляет рабочий запас.
 
 ## Типовые ошибки
 

@@ -1,8 +1,9 @@
-export type ToolApprovalDecision = "allow-once" | "allow-always" | "deny";
+export type ToolApprovalDecision = "allow-once" | "allow-session" | "allow-always" | "deny";
 
 export interface ToolApprovalDecisionPayload {
   approvalId: string;
   callId?: string;
+  actionHash?: string;
   decision: ToolApprovalDecision;
 }
 
@@ -36,6 +37,7 @@ export function extractToolApprovalDecision(message: unknown): ToolApprovalDecis
   return {
     approvalId,
     callId: asString(raw.callId) ?? asString(raw.call_id),
+    actionHash: asString(raw.actionHash) ?? asString(raw.action_hash),
     decision,
   };
 }
@@ -57,6 +59,9 @@ function normalizeDecision(value: string | undefined): ToolApprovalDecision | un
     case "allow-always":
     case "allow_always":
       return "allow-always";
+    case "allow-session":
+    case "allow_session":
+      return "allow-session";
     case "deny":
     case "reject":
     case "reject-once":

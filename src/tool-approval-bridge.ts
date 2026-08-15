@@ -17,8 +17,9 @@ import type { ExecutionEventBus } from "@a2a-js/sdk/server";
 
 import { agentMessage, dataPart, publishStatusUpdate, publishToolArtifact } from "./a2a/helpers.js";
 import type { ToolApprovalDecision } from "./tool-approval.js";
+import { classifyToolCapability, computeActionHash, type ToolCapability } from "./tool-capabilities.js";
 
-export type BridgeApprovalDecision = ToolApprovalDecision | "timeout" | "cancelled";
+export type BridgeApprovalDecision = ToolApprovalDecision | "timeout" | "cancelled" | "unavailable" | "duplicate";
 
 export type ActiveApprovalStream = {
   eventBus: ExecutionEventBus;
@@ -34,6 +35,9 @@ type PendingApproval = {
   toolName: string;
   runId?: string;
   taskId?: string;
+  userTurnId: string;
+  actionHash: string;
+  capability: ToolCapability;
   resolve: (decision: BridgeApprovalDecision) => void;
   timer?: ReturnType<typeof setTimeout>;
 };
@@ -97,6 +101,9 @@ export class ToolApprovalBridge {
   private readonly runIdAliases = new Map<string, string>();
   private readonly pendingByApprovalId = new Map<string, PendingApproval>();
   private readonly pendingByCallId = new Map<string, PendingApproval>();
+  /** Exact approved action identity; prevents reconnect/retry side effects. */
+  private readonly executionByActionHash = new Map<string, { callId: string; state: "approved" | "completed" }>();
+  private readonly actionHashByCallId = new Map<string, string>();
   /** In-flight approval waits shared across duplicate before_tool_call hooks. */
   private readonly inFlightByCallId = new Map<string, Promise<BridgeApprovalDecision>>();
   /** sessionKey → toolName → true after allow-always */
@@ -189,9 +196,11 @@ export class ToolApprovalBridge {
     return this.streamsByRunId.size;
   }
 
-  shouldRequireApproval(toolName: string, tools?: string[]): boolean {
-    if (!tools || tools.length === 0) return true;
-    return tools.includes(toolName);
+  shouldRequireApproval(toolName: string, params: Record<string, unknown>, tools?: string[]): boolean {
+    const capability = classifyToolCapability(toolName, params);
+    if (!capability.requiresApproval) return false;
+    void tools; // Legacy config remains accepted; local semantics are authoritative.
+    return true;
   }
 
   isAlwaysAllowed(sessionKey: string | undefined, toolName: string): boolean {
@@ -271,18 +280,12 @@ export class ToolApprovalBridge {
    * Returns the decision; caller should `block` on deny/timeout/cancelled.
    */
   async requestApproval(params: RequestApprovalParams): Promise<BridgeApprovalDecision> {
-    if (!this.shouldRequireApproval(params.toolName, params.tools)) {
+    if (!this.shouldRequireApproval(params.toolName, params.params, params.tools)) {
       return "allow-once";
     }
 
     const callId = (params.toolCallId || "").trim() || randomUUID();
 
-    // allow-always: still publish running on the live A2A bus so BFF/UI see the tool.
-    // Skipping publish left clients stuck on the previous pending/empty state.
-    if (this.isAlwaysAllowed(params.sessionKey, params.toolName)) {
-      this.publishAutoAllowed(params, callId);
-      return "allow-always";
-    }
 
     const existing = this.inFlightByCallId.get(callId);
     if (existing) {
@@ -290,14 +293,53 @@ export class ToolApprovalBridge {
       return existing;
     }
 
-    const wait = this.requestApprovalOnce(params, callId);
+    const stream = this.findStream({ runId: params.runId, sessionKey: params.sessionKey });
+    if (!stream) return "unavailable";
+    const capability = classifyToolCapability(params.toolName, params.params);
+    const actionHash = computeActionHash({
+      userTurnId: stream.taskId,
+      toolName: params.toolName,
+      params: params.params,
+      sessionKey: normalizeSessionKey(params.sessionKey ?? stream.sessionKey),
+      contextId: stream.contextId,
+    });
+    if (this.executionByActionHash.has(actionHash)) return "duplicate";
+
+    const wait = this.requestApprovalOnce(params, callId, stream, capability, actionHash);
     this.inFlightByCallId.set(callId, wait);
     try {
-      return await wait;
+      const decision = await wait;
+      if (decision === "allow-once" || decision === "allow-session"
+        || decision === "allow-always") {
+        this.executionByActionHash.set(actionHash, { callId, state: "approved" });
+        this.actionHashByCallId.set(callId, actionHash);
+      }
+      return decision;
     } finally {
       this.inFlightByCallId.delete(callId);
     }
   }
+  /** Reserve a Judge-approved exact action before the tool is allowed to run. */
+  reserveApprovedAction(params: RequestApprovalParams): BridgeApprovalDecision {
+    if (!this.shouldRequireApproval(params.toolName, params.params, params.tools)) {
+      return "allow-once";
+    }
+    const stream = this.findStream({ runId: params.runId, sessionKey: params.sessionKey });
+    if (!stream) return "unavailable";
+    const actionHash = computeActionHash({
+      userTurnId: stream.taskId,
+      toolName: params.toolName,
+      params: params.params,
+      sessionKey: normalizeSessionKey(params.sessionKey ?? stream.sessionKey),
+      contextId: stream.contextId,
+    });
+    if (this.executionByActionHash.has(actionHash)) return "duplicate";
+    const callId = (params.toolCallId || "").trim() || randomUUID();
+    this.executionByActionHash.set(actionHash, { callId, state: "approved" });
+    this.actionHashByCallId.set(callId, actionHash);
+    return "allow-once";
+  }
+
 
   private publishAutoAllowed(params: RequestApprovalParams, callId: string): void {
     const stream = this.findStream({
@@ -329,18 +371,11 @@ export class ToolApprovalBridge {
   private async requestApprovalOnce(
     params: RequestApprovalParams,
     callId: string,
+    stream: ActiveApprovalStream,
+    capability: ToolCapability,
+    actionHash: string,
   ): Promise<BridgeApprovalDecision> {
-    const stream = this.findStream({
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-    });
-
     const approvalId = randomUUID();
-
-    // No active A2A stream (e.g. local OpenClaw chat without A2A) — do not block.
-    if (!stream) {
-      return "allow-once";
-    }
 
     // Learn OpenClaw runId → A2A stream for subsequent tool calls in this turn.
     this.aliasRunId(params.runId, stream.runId);
@@ -354,6 +389,9 @@ export class ToolApprovalBridge {
       phase: "start",
       status: "pending_approval",
       approvalId,
+      actionHash,
+      capability: capability.kind,
+      userTurnId: stream.taskId,
       input: params.params,
     });
 
@@ -367,6 +405,10 @@ export class ToolApprovalBridge {
           dataPart({
             kind: "toolApproval",
             approvalId,
+            actionHash,
+            userTurnId: stream.taskId,
+            capability: capability.kind,
+            toolFamily: capability.toolFamily,
             callId,
             name: params.toolName,
             reason: `Allow ${params.toolName}: ${summarizeParams(params.params)}`,
@@ -382,6 +424,9 @@ export class ToolApprovalBridge {
         toolName: params.toolName,
         runId: stream.runId,
         taskId: stream.taskId,
+        userTurnId: stream.taskId,
+        actionHash,
+        capability,
         resolve,
       };
       if (params.timeoutMs > 0) {
@@ -395,11 +440,8 @@ export class ToolApprovalBridge {
 
     this.awaitingTaskIds.delete(stream.taskId);
 
-    if (decision === "allow-always") {
-      this.rememberAlwaysAllow(params.sessionKey, params.toolName);
-    }
-
-    if (decision === "allow-once" || decision === "allow-always") {
+    if (decision === "allow-once" || decision === "allow-session"
+      || decision === "allow-always") {
       publishToolArtifact(stream.eventBus, stream.taskId, stream.contextId, {
         kind: "tool",
         callId,
@@ -464,6 +506,10 @@ export class ToolApprovalBridge {
       return false;
     }
     this.aliasRunId(params.runId, stream.runId);
+    const actionHash = this.actionHashByCallId.get(callId);
+    if (actionHash) {
+      this.executionByActionHash.set(actionHash, { callId, state: "completed" });
+    }
 
     const failed = params.isError === true || Boolean(params.error);
     const output =
@@ -493,11 +539,15 @@ export class ToolApprovalBridge {
     approvalId: string,
     decision: ToolApprovalDecision,
     callId?: string,
+    actionHash?: string,
   ): boolean {
     const pending =
       this.pendingByApprovalId.get(approvalId) ||
       (callId ? this.pendingByCallId.get(callId) : undefined);
     if (!pending) {
+      return false;
+    }
+    if (actionHash && actionHash !== pending.actionHash) {
       return false;
     }
     this.settlePending(pending, decision);

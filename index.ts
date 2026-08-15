@@ -638,7 +638,8 @@ const plugin = {
             tools: config.toolApproval.tools,
           });
 
-          if (decision === "deny" || decision === "timeout" || decision === "cancelled") {
+          if (decision === "deny" || decision === "timeout" || decision === "cancelled"
+            || decision === "unavailable" || decision === "duplicate") {
             api.logger.info(
               `a2a-gateway: blocked tool ${toolName} decision=${decision} callId=${toolCallId ?? ""}`,
             );
@@ -647,7 +648,11 @@ const plugin = {
               blockReason:
                 decision === "deny"
                   ? `Tool "${toolName}" denied by user`
-                  : `Tool "${toolName}" approval ${decision}`,
+                  : decision === "unavailable"
+                    ? `approval_unavailable: no active A2A approval surface for "${toolName}"`
+                    : decision === "duplicate"
+                      ? `duplicate_action: exact action was already approved or executed`
+                      : `Tool "${toolName}" approval ${decision}`,
             };
           }
 

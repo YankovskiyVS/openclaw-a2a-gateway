@@ -96,5 +96,105 @@ describe("installStableTaskIds", () => {
     assert.equal((persistedRetry as any).id, "retry-msg-1");
     assert.equal((persistedRetry as any).status.state, 3);
   });
+  it("deduplicates running and completed message/stream requests", async () => {
+    const saved: any[] = [];
+    const store = {
+      async load(id: string) {
+        return saved.find((task) => task.id === id);
+      },
+      async save(task: any) {
+        const index = saved.findIndex((item) => item.id === task.id);
+        if (index === -1) saved.push(task);
+        else saved[index] = task;
+      },
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    class FakeStreamingHandler {
+      taskStore = store;
+      streamCalls = 0;
+      sideEffectCalls = 0;
+
+      async _createRequestContext(request: any) {
+        return { taskId: request.message.taskId };
+      }
+
+      async *sendMessageStream(request: any, context: unknown) {
+        this.streamCalls += 1;
+        this.sideEffectCalls += 1;
+        const requestContext = await (this as any)._createRequestContext(request, context);
+        const working = {
+          kind: "task",
+          id: requestContext.taskId,
+          contextId: request.message.contextId,
+          status: { state: 2 },
+          history: [{ messageId: request.message.messageId }],
+          artifacts: [],
+        };
+        await store.save(working);
+        yield { payload: { $case: "task", value: working } };
+
+        await gate;
+        const completed = { ...working, status: { state: 3 } };
+        await store.save(completed);
+        yield {
+          payload: {
+            $case: "statusUpdate",
+            value: {
+              taskId: completed.id,
+              contextId: completed.contextId,
+              status: completed.status,
+            },
+          },
+        };
+      }
+    }
+
+    assert.equal(installStableTaskIds(FakeStreamingHandler as any), true);
+    const handler = new FakeStreamingHandler();
+    const firstRequest = {
+      message: { messageId: "stream-msg-1", contextId: "ctx-stream" },
+    };
+    const owner = (handler as any).sendMessageStream(firstRequest, {});
+    const initial = await owner.next();
+
+    assert.equal(initial.value.payload.$case, "task");
+    assert.equal(initial.value.payload.value.id, "stream-msg-1");
+
+    const retry = (handler as any).sendMessageStream(
+      { message: { messageId: "stream-msg-1", contextId: "ctx-stream" } },
+      {},
+    );
+    const retrySnapshot = await retry.next();
+    const retryDone = await retry.next();
+
+    assert.equal(retrySnapshot.value.payload.$case, "task");
+    assert.equal(retrySnapshot.value.payload.value.status.state, 2);
+    assert.equal(retryDone.done, true);
+    assert.equal(handler.streamCalls, 1);
+    assert.equal(handler.sideEffectCalls, 1, "side effect must execute exactly once");
+
+    release();
+    const terminal = await owner.next();
+    const ownerDone = await owner.next();
+    assert.equal(terminal.value.payload.$case, "statusUpdate");
+    assert.equal(terminal.value.payload.value.status.state, 3);
+    assert.equal(ownerDone.done, true);
+
+    const restartedHandler = new FakeStreamingHandler();
+    const completedRetry = (restartedHandler as any).sendMessageStream(
+      { message: { messageId: "stream-msg-1", contextId: "ctx-stream" } },
+      {},
+    );
+    const persisted = await completedRetry.next();
+    assert.equal(persisted.value.payload.$case, "task");
+    assert.equal(persisted.value.payload.value.status.state, 3);
+    assert.equal(restartedHandler.streamCalls, 0);
+    assert.equal(restartedHandler.sideEffectCalls, 0);
+  });
+
 
 });

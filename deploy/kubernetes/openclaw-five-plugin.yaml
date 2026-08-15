@@ -1,0 +1,383 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openclaw
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openclaw-five-plugin-secrets
+  namespace: openclaw
+type: Opaque
+stringData:
+  # Replace every value before applying this manifest. Never commit real keys.
+  CLOUDRU_API_KEY: REPLACE_ME
+  OPENCLAW_JUDGE_API_KEY: REPLACE_ME
+  OPENCLAW_GATEWAY_TOKEN: REPLACE_WITH_RANDOM_TOKEN
+  A2A_TOKEN: REPLACE_WITH_RANDOM_TOKEN
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-five-plugin-env
+  namespace: openclaw
+data:
+  OPENCLAW_JUDGE_PROFILE: supervised
+  OPENCLAW_JUDGE_A2A_HITL_REPLACE: "false"
+  OPENCLAW_JUDGE_MODEL_ID: Qwen/Qwen3.5-397B-A17B
+  OPENCLAW_JUDGE_LOG_LEVEL: info
+  NANGO_PROXY_URL: http://ai-assistant-nango-proxy.ai-assistant-nango-proxy.svc.cluster.local:8080
+  EVOLUTION_PROJECT_ID: REPLACE_ME
+  EVOCLAW_ID: REPLACE_ME
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-five-plugin-config
+  namespace: openclaw
+data:
+  openclaw.json: |
+    {
+      "gateway": {
+        "mode": "local",
+        "port": 19080,
+        "bind": "lan",
+        "auth": {
+          "mode": "token",
+          "token": "${OPENCLAW_GATEWAY_TOKEN}"
+        }
+      },
+      "agents": {
+        "defaults": {
+          "model": {
+            "primary": "cloudru/Qwen/Qwen3.6-35B-A3B"
+          },
+          "models": {
+            "cloudru/Qwen/Qwen3.6-35B-A3B": {
+              "alias": "Cloud.ru Qwen3.6 35B A3B"
+            }
+          }
+        }
+      },
+      "models": {
+        "mode": "merge",
+        "providers": {
+          "cloudru": {
+            "baseUrl": "https://foundation-models.api.cloud.ru/v1",
+            "apiKey": "${CLOUDRU_API_KEY}",
+            "api": "openai-completions",
+            "models": [
+              {
+                "id": "Qwen/Qwen3.6-35B-A3B",
+                "name": "Qwen3.6 35B A3B (Cloud.ru)",
+                "reasoning": false,
+                "input": ["text"],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 131072,
+                "maxTokens": 2500,
+                "compat": {
+                  "requiresStringContent": true
+                }
+              }
+            ]
+          }
+        }
+      },
+      "plugins": {
+        "allow": [
+          "a2a-gateway",
+          "browser",
+          "diagnostics-otel",
+          "llm-action-judge",
+          "nango-proxy"
+        ],
+        "load": {
+          "paths": [
+            "/plugins/a2a",
+            "/plugins/judge",
+            "/plugins/nango"
+          ]
+        },
+        "entries": {
+          "a2a-gateway": {
+            "enabled": true,
+            "config": {
+              "agentCard": {
+                "name": "Production OpenClaw",
+                "url": "http://openclaw-five-plugin.openclaw.svc.cluster.local:18800/a2a/jsonrpc",
+                "skills": [
+                  {
+                    "id": "chat",
+                    "name": "chat",
+                    "description": "A2A bridge to the main agent"
+                  }
+                ]
+              },
+              "server": {
+                "host": "0.0.0.0",
+                "port": 18800,
+                "grpcEnabled": false
+              },
+              "storage": {
+                "tasksDir": "/state/a2a-tasks",
+                "taskTtlHours": 72,
+                "cleanupIntervalMinutes": 60
+              },
+              "routing": {
+                "defaultAgentId": "main",
+                "rules": []
+              },
+              "limits": {
+                "maxConcurrentTasks": 1,
+                "maxQueuedTasks": 100
+              },
+              "security": {
+                "inboundAuth": "bearer",
+                "token": "${A2A_TOKEN}"
+              },
+              "toolApproval": {
+                "enabled": true,
+                "timeoutMs": 120000
+              }
+            }
+          },
+          "browser": {
+            "enabled": true
+          },
+          "diagnostics-otel": {
+            "enabled": true
+          },
+          "llm-action-judge": {
+            "enabled": true,
+            "hooks": {
+              "allowConversationAccess": true
+            },
+            "config": {
+              "mode": "supervised",
+              "enforcement": "enforce"
+            }
+          },
+          "nango-proxy": {
+            "enabled": true,
+            "config": {
+              "apiKeyEnv": "CLOUDRU_API_KEY"
+            }
+          }
+        }
+      },
+      "browser": {
+        "enabled": true,
+        "headless": true
+      },
+      "diagnostics": {
+        "enabled": true,
+        "otel": {
+          "enabled": true,
+          "traces": false,
+          "metrics": false,
+          "logs": true,
+          "logsExporter": "stdout",
+          "serviceName": "openclaw-five-plugin-stack",
+          "captureContent": {
+            "enabled": false
+          }
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openclaw-five-plugin
+  namespace: openclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: openclaw-five-plugin
+  ports:
+    - name: gateway
+      port: 19080
+      targetPort: gateway
+    - name: a2a
+      port: 18800
+      targetPort: a2a
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openclaw-five-plugin-state
+  namespace: openclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw-five-plugin
+  namespace: openclaw
+  labels:
+    app.kubernetes.io/name: openclaw-five-plugin
+    app.kubernetes.io/version: "2026.7.1-2"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openclaw-five-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openclaw-five-plugin
+        app.kubernetes.io/version: "2026.7.1-2"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: install-external-plugins
+          image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              install_plugin() {
+                repo="$1"
+                destination="$2"
+                commit="$3"
+                git clone --filter=blob:none --no-checkout "$repo" "$destination"
+                git -C "$destination" fetch --depth=1 origin "$commit"
+                git -C "$destination" checkout --detach "$commit"
+                npm --prefix "$destination" ci --ignore-scripts --omit=dev --omit=peer
+              }
+
+              install_plugin https://github.com/mr8bit/openclaw-a2a-gateway.git /plugins/a2a 45a6952ba93b85c095008c0beff16e74d23832be
+              install_plugin https://github.com/mr8bit/llm-approve-openclaw-plugin.git /plugins/judge 02d7def6ea95f0e362bb3f0d537c4fa44f810546
+              install_plugin https://github.com/mr8bit/nango-openclaw-plugin.git /plugins/nango 5805a127d6c0f78fed56d527d4ebf1414f54c58b
+              mkdir -p /state/config
+              cp /config-source/openclaw.json /state/config/openclaw.json
+              chown -R 1000:1000 /plugins /state
+          env:
+            - name: NODE_OPTIONS
+              value: --max-old-space-size=1024
+          resources:
+            # requests:limits = 1:3; installs run sequentially.
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: 750m
+              memory: 1536Mi
+              ephemeral-storage: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins
+            - name: config
+              mountPath: /config-source
+              readOnly: true
+            - name: state
+              mountPath: /state
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:2026.7.1-2-browser@sha256:905f0ef5214f53182f1ef26934b4dd733a08965efb4fd887f6c338fc02fa1086
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: openclaw-five-plugin-secrets
+            - configMapRef:
+                name: openclaw-five-plugin-env
+          env:
+            - name: OPENCLAW_CONFIG_PATH
+              value: /state/config/openclaw.json
+            - name: OPENCLAW_STATE_DIR
+              value: /state
+          ports:
+            - name: gateway
+              containerPort: 19080
+              protocol: TCP
+            - name: a2a
+              containerPort: 18800
+              protocol: TCP
+          resources:
+            # Exact requests:limits ratio is 1:3 for CPU, RAM and ephemeral disk.
+            # The 1536Mi ceiling leaves headroom over the measured ~790Mi peak
+            # of the five-plugin model/tool-call path and one headless browser.
+            requests:
+              cpu: 167m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: 501m
+              memory: 1536Mi
+              ephemeral-storage: 3Gi
+          startupProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: a2a
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: a2a
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: a2a
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins
+              readOnly: true
+            - name: state
+              mountPath: /state
+            - name: tmp
+              mountPath: /tmp
+            - name: dev-shm
+              mountPath: /dev/shm
+      volumes:
+        - name: config
+          configMap:
+            name: openclaw-five-plugin-config
+        - name: plugins
+          emptyDir: {}
+        - name: state
+          persistentVolumeClaim:
+            claimName: openclaw-five-plugin-state
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

@@ -22,6 +22,7 @@ import { GatewayTelemetry } from "./telemetry.js";
 import { computeSaturationDelay, type SaturationConfig } from "./saturation-model.js";
 import { isInterruptOnlyMessage } from "./interrupt.js";
 import { isToolApprovalOnlyMessage } from "./tool-approval.js";
+import { markInitialTaskPublished } from "./task-lifecycle.js";
 
 interface QueueingExecutorOptions {
   /**
@@ -42,6 +43,7 @@ interface QueuedTaskEntry {
   eventBus: ExecutionEventBus;
   resolve: () => void;
   reject: (error: Error) => void;
+  completion: Promise<void>;
 }
 
 interface SessionLane {
@@ -153,76 +155,105 @@ export class QueueingAgentExecutor implements AgentExecutor {
   }
 
   execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const sessionKey = sessionKeyFromContext(requestContext);
-      const lane = this.getOrCreateLane(sessionKey);
-      const entry: QueuedTaskEntry = {
-        requestContext,
-        eventBus,
-        resolve,
-        reject,
-      };
+    const bypass = isSessionQueueBypassMessage(requestContext);
+    const pending = this.pendingByTaskId.get(requestContext.taskId);
+    if (pending && !bypass) {
+      // Defense in depth: the request handler normally catches duplicate
+      // messageIds. Never enqueue or execute the same task twice even if a
+      // retry reaches this lower layer while the owner is queued/running.
+      return pending.entry.completion;
+    }
 
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const completion = new Promise<void>((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
+    });
+    const sessionKey = sessionKeyFromContext(requestContext);
+    const lane = this.getOrCreateLane(sessionKey);
+    const entry: QueuedTaskEntry = {
+      requestContext,
+      eventBus,
+      resolve,
+      reject,
+      completion,
+    };
+
+    if (!pending) {
       this.pendingByTaskId.set(requestContext.taskId, { entry, sessionKey });
+    }
 
-      // Interrupt / tool-approval ack must run immediately even if the session
-      // lane is full — otherwise cancel/HITL wait behind the turn they control.
-      if (isSessionQueueBypassMessage(requestContext)) {
-        void this.runEntry(lane, entry, { bypassConcurrency: true });
-        return;
+    // Interrupt / tool-approval ack must run immediately even if the session
+    // lane is full — otherwise cancel/HITL wait behind the turn they control.
+    if (bypass) {
+      if (!pending) {
+        this.publishInitialTask(entry, TaskState.TASK_STATE_WORKING);
       }
+      void this.runEntry(lane, entry, { bypassConcurrency: true });
+      return completion;
+    }
 
-      if (lane.activeTasks < this.options.maxConcurrentTasks) {
-        // Reserve the slot synchronously to avoid a race where two execute()
-        // calls both see activeTasks < max before either increments.
-        lane.activeTasks += 1;
-        void this.runEntry(lane, entry, { reserved: true });
-        return;
-      }
+    if (lane.activeTasks < this.options.maxConcurrentTasks) {
+      // Reserve the slot synchronously to avoid a race where two execute()
+      // calls both see activeTasks < max before either increments.
+      lane.activeTasks += 1;
+      this.publishInitialTask(entry, TaskState.TASK_STATE_WORKING);
+      void this.runEntry(lane, entry, { reserved: true });
+      return completion;
+    }
 
-      if (lane.queue.length >= this.options.maxQueuedTasks) {
-        this.pendingByTaskId.delete(requestContext.taskId);
-        this.telemetry.recordQueueRejected(
-          requestContext.taskId,
-          requestContext.contextId,
-          lane.queue.length,
-        );
-        eventBus.publish(
-          taskEvent(
-            requestContext.taskId,
-            requestContext.contextId,
-            TaskState.TASK_STATE_REJECTED,
-            "Session queue limit reached",
-          ),
-        );
-        eventBus.finished();
-        resolve();
-        return;
-      }
-
-      lane.queue.push(entry);
-      this.telemetry.recordTaskQueued(
+    if (lane.queue.length >= this.options.maxQueuedTasks) {
+      this.pendingByTaskId.delete(requestContext.taskId);
+      this.telemetry.recordQueueRejected(
         requestContext.taskId,
         requestContext.contextId,
         lane.queue.length,
-        this.totalQueued(),
-      );
-      const queuedTask = buildTask(
-        requestContext.taskId,
-        requestContext.contextId,
-        TaskState.TASK_STATE_SUBMITTED,
-        {
-          statusMessage: statusMessage(
-            requestContext.contextId,
-            `Queued for execution in session (position ${lane.queue.length})`,
-            requestContext.taskId,
-          ),
-        },
       );
       eventBus.publish(
-        AgentEvent.task(queuedTask),
+        taskEvent(
+          requestContext.taskId,
+          requestContext.contextId,
+          TaskState.TASK_STATE_REJECTED,
+          "Session queue limit reached",
+        ),
       );
-    });
+      eventBus.finished();
+      resolve();
+      return completion;
+    }
+
+    lane.queue.push(entry);
+    this.telemetry.recordTaskQueued(
+      requestContext.taskId,
+      requestContext.contextId,
+      lane.queue.length,
+      this.totalQueued(),
+    );
+    this.publishInitialTask(
+      entry,
+      TaskState.TASK_STATE_SUBMITTED,
+      `Queued for execution in session (position ${lane.queue.length})`,
+    );
+    return completion;
+  }
+
+  private publishInitialTask(
+    entry: QueuedTaskEntry,
+    state: TaskState,
+    text?: string,
+  ): void {
+    const { requestContext, eventBus } = entry;
+    markInitialTaskPublished(requestContext);
+    eventBus.publish(
+      AgentEvent.task(
+        buildTask(requestContext.taskId, requestContext.contextId, state, {
+          statusMessage: text
+            ? statusMessage(requestContext.contextId, text, requestContext.taskId)
+            : undefined,
+        }),
+      ),
+    );
   }
 
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
@@ -352,7 +383,9 @@ export class QueueingAgentExecutor implements AgentExecutor {
       entry.reject(error instanceof Error ? error : new Error(message));
       return;
     } finally {
-      this.pendingByTaskId.delete(requestContext.taskId);
+      if (this.pendingByTaskId.get(requestContext.taskId)?.entry === entry) {
+        this.pendingByTaskId.delete(requestContext.taskId);
+      }
       if (countsTowardLimit) {
         lane.activeTasks = Math.max(0, lane.activeTasks - 1);
       }
