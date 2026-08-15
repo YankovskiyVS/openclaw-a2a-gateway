@@ -50,6 +50,7 @@ import {
   localPathIndex,
   materializeInboundFiles,
 } from "./inbound-media.js";
+import { hasInitialTaskPublished } from "./task-lifecycle.js";
 
 const DEFAULT_AGENT_RESPONSE_TIMEOUT_MS = 300_000;
 const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 360_000;
@@ -1739,7 +1740,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         const ackMessage = agentMessage(contextId, [
           textPart("Tool approval recorded"),
         ], taskId);
-        if (this.isQueuedTask(requestContext)) {
+        if (hasInitialTaskPublished(requestContext)) {
           publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
             statusMessage: ackMessage,
           });
@@ -1807,7 +1808,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       const ackMessage = agentMessage(contextId, [
         textPart(targets.length > 0 ? "Interrupt recorded" : "No active run to interrupt"),
       ], taskId);
-      if (this.isQueuedTask(requestContext)) {
+      if (hasInitialTaskPublished(requestContext)) {
         publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED, {
           statusMessage: ackMessage,
         });
@@ -1843,7 +1844,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       const rejectedMessage = agentMessage(contextId, [
         textPart(`File validation failed: ${fileValidationError}`),
       ], taskId);
-      if (this.isQueuedTask(requestContext)) {
+      if (hasInitialTaskPublished(requestContext)) {
         publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_FAILED, {
           statusMessage: rejectedMessage,
         });
@@ -1883,7 +1884,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       const rejectedMessage = agentMessage(contextId, [
         textPart(`Failed to materialize attached file(s): ${message}`),
       ], taskId);
-      if (this.isQueuedTask(requestContext)) {
+      if (hasInitialTaskPublished(requestContext)) {
         publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_FAILED, {
           statusMessage: rejectedMessage,
         });
@@ -1900,7 +1901,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
       return;
     }
 
-    if (this.isQueuedTask(requestContext)) {
+    if (hasInitialTaskPublished(requestContext)) {
       publishStatusUpdate(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING);
     } else {
       publishTask(
@@ -2028,10 +2029,6 @@ export class OpenClawAgentExecutor implements AgentExecutor {
     eventBus.finished();
   }
 
-  /** Queueing executor publishes SUBMITTED before delegate runs — lifecycle is already open. */
-  private isQueuedTask(requestContext: RequestContext): boolean {
-    return requestContext.task?.status?.state === TaskState.TASK_STATE_SUBMITTED;
-  }
 
   // cancelTask aborts the live OpenClaw agent run (when active) and publishes
   // TASK_STATE_CANCELED. History is omitted: cancel only receives taskId.

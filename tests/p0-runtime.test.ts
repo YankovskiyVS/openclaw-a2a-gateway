@@ -149,6 +149,8 @@ describe("P0 runtime components", () => {
 
     await Promise.resolve();
 
+    assert.equal((bus1.events[0] as { kind?: string }).kind, "task");
+    assert.equal(executionTaskState(bus1.events[0]), TaskState.TASK_STATE_WORKING);
     assert.equal(executionTaskState(bus2.events[0]), TaskState.TASK_STATE_SUBMITTED);
     assert.equal(executionTaskState(bus3.events[0]), TaskState.TASK_STATE_REJECTED);
     assert.equal(bus3.isFinished(), true);
@@ -171,6 +173,74 @@ describe("P0 runtime components", () => {
     assert.equal(snapshot.tasks.rejected, 1);
     assert.equal(snapshot.tasks.queued, 1);
   });
+  it("QueueingAgentExecutor does not run duplicate queued or running taskIds", async () => {
+    const telemetry = new GatewayTelemetry(silentLogger(), { structuredLogs: false });
+    const busyGate = createDeferred();
+    const queuedGate = createDeferred();
+    const calls = new Map<string, number>();
+
+    const delegate: AgentExecutor = {
+      async execute(requestContext, eventBus) {
+        calls.set(requestContext.taskId, (calls.get(requestContext.taskId) ?? 0) + 1);
+        if (requestContext.taskId === "task-busy") {
+          await busyGate.promise;
+        } else {
+          await queuedGate.promise;
+        }
+        eventBus.publish(
+          AgentEvent.statusUpdate({
+            taskId: requestContext.taskId,
+            contextId: requestContext.contextId,
+            status: {
+              state: TaskState.TASK_STATE_COMPLETED,
+              timestamp: new Date().toISOString(),
+              message: undefined,
+            },
+            metadata: undefined,
+          }),
+        );
+        eventBus.finished();
+      },
+      async cancelTask(_taskId, eventBus) {
+        eventBus.finished();
+      },
+    };
+
+    const executor = new QueueingAgentExecutor(delegate, telemetry, {
+      maxConcurrentTasks: 1,
+      maxQueuedTasks: 2,
+    });
+    const session = "ctx-dedup";
+    const busyBus = createEventBus();
+    const ownerBus = createEventBus();
+    const duplicateBus = createEventBus();
+
+    const busy = executor.execute(makeRequestContext("task-busy", session), busyBus.bus);
+    const owner = executor.execute(makeRequestContext("task-same", session), ownerBus.bus);
+    const duplicate = executor.execute(
+      makeRequestContext("task-same", session),
+      duplicateBus.bus,
+    );
+
+    assert.equal(owner, duplicate, "duplicate must join the owner's completion");
+    assert.equal((ownerBus.events[0] as { kind?: string }).kind, "task");
+    assert.equal(executionTaskState(ownerBus.events[0]), TaskState.TASK_STATE_SUBMITTED);
+    assert.equal(duplicateBus.events.length, 0, "duplicate must not publish on a second bus");
+
+    busyGate.resolve();
+    await busy;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(calls.get("task-same"), 1);
+
+    queuedGate.resolve();
+    await Promise.all([owner, duplicate]);
+    assert.equal(calls.get("task-same"), 1, "underlying agent must execute once");
+    assert.equal(
+      executionTaskState(ownerBus.events.at(-1)),
+      TaskState.TASK_STATE_COMPLETED,
+    );
+  });
+
 
   it("QueueingAgentExecutor runs different sessions in parallel", async () => {
     const telemetry = new GatewayTelemetry(silentLogger(), { structuredLogs: false });
