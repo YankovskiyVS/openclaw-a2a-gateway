@@ -319,6 +319,27 @@ export class ToolApprovalBridge {
       this.inFlightByCallId.delete(callId);
     }
   }
+  /** Reserve a Judge-approved exact action before the tool is allowed to run. */
+  reserveApprovedAction(params: RequestApprovalParams): BridgeApprovalDecision {
+    if (!this.shouldRequireApproval(params.toolName, params.params, params.tools)) {
+      return "allow-once";
+    }
+    const stream = this.findStream({ runId: params.runId, sessionKey: params.sessionKey });
+    if (!stream) return "unavailable";
+    const actionHash = computeActionHash({
+      userTurnId: stream.taskId,
+      toolName: params.toolName,
+      params: params.params,
+      sessionKey: normalizeSessionKey(params.sessionKey ?? stream.sessionKey),
+      contextId: stream.contextId,
+    });
+    if (this.executionByActionHash.has(actionHash)) return "duplicate";
+    const callId = (params.toolCallId || "").trim() || randomUUID();
+    this.executionByActionHash.set(actionHash, { callId, state: "approved" });
+    this.actionHashByCallId.set(callId, actionHash);
+    return "allow-once";
+  }
+
 
   private publishAutoAllowed(params: RequestApprovalParams, callId: string): void {
     const stream = this.findStream({

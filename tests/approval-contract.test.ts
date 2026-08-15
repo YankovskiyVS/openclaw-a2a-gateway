@@ -58,6 +58,22 @@ describe("native approval contract", () => {
     bridge.unregisterStream("run-9");
   });
 
+
+  it("reserves Judge-approved mutations in the same exact-action ledger", () => {
+    const bridge = new ToolApprovalBridge();
+    const bus = eventBus();
+    bridge.registerStream({ eventBus: bus as never, taskId: "turn-judge", contextId: "ctx-judge", runId: "run-judge" });
+    const input = {
+      toolName: "nango_yandex_mail_send",
+      params: { to: ["user@example.test"], subject: "s", body: "b" },
+      toolCallId: "judge-mail-1",
+      runId: "run-judge",
+      timeoutMs: 5_000,
+    };
+    assert.equal(bridge.reserveApprovedAction(input), "allow-once");
+    assert.equal(bridge.reserveApprovedAction({ ...input, toolCallId: "judge-mail-2" }), "duplicate");
+    bridge.unregisterStream("run-judge");
+  });
   it("changing recipient creates a new actionHash and approval", async () => {
     const bridge = new ToolApprovalBridge();
     const bus = eventBus();
