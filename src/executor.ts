@@ -1714,6 +1714,7 @@ export class OpenClawAgentExecutor implements AgentExecutor {
         approvalDecision.approvalId,
         approvalDecision.decision,
         approvalDecision.callId,
+        approvalDecision.actionHash,
       );
       if (!settled) {
         // Fallback: native OpenClaw exec approvals (exec.approval.resolve).

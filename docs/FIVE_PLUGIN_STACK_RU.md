@@ -189,7 +189,8 @@ A2A_TOKEN=<random-bearer-token>
             "token": "${A2A_TOKEN}"
           },
           "toolApproval": {
-            "enabled": false
+            "enabled": true,
+            "timeoutMs": 120000
           }
         }
       },
@@ -205,8 +206,8 @@ A2A_TOKEN=<random-bearer-token>
           "allowConversationAccess": true
         },
         "config": {
-          "mode": "autonomous",
-          "enforcement": "shadow"
+          "mode": "supervised",
+          "enforcement": "enforce"
         }
       },
       "nango-proxy": {
@@ -239,16 +240,18 @@ A2A_TOKEN=<random-bearer-token>
 }
 ```
 
-### Почему A2A tool approval выключен
+### Почему A2A tool approval включён
 
-В проверенном стеке `a2a-gateway.config.toolApproval.enabled=false`, поскольку
-все proposed tool calls уже проверяет глобальный `llm-action-judge`. При
-одновременном включении A2A HITL появится второй независимый approval, для
-которого A2A-клиент должен отправлять решение.
+В рабочем стеке `a2a-gateway.config.toolApproval.enabled=true`,
+`OPENCLAW_JUDGE_PROFILE=supervised` и
+`OPENCLAW_JUDGE_A2A_HITL_REPLACE=false`. Judge разрешает proven-passive calls,
+блокирует policy deny и передаёт review/technical failure в один native A2A
+pending approval. Mutation без доступной approval surface завершается
+`approval_unavailable`, а не silent allow/deny.
 
-Для первого запуска используйте `enforcement=shadow`: Judge оценивает и пишет
-audit, но не блокирует действия. После анализа audit можно включить
-`enforcement=enforce` и выбрать `mode=supervised` либо `autonomous`.
+Approval связан с `userTurnId + toolName + normalized params + session/context`
+через `actionHash`; изменение адресата/контента требует нового решения, а retry
+точного actionHash не запускает side effect повторно.
 
 ## 4. Docker paths и порты
 

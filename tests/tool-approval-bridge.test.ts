@@ -83,7 +83,7 @@ describe("ToolApprovalBridge", () => {
     assert.equal(decision, "allow-once");
   });
 
-  it("allow-always remembers tool for session", async () => {
+  it("allow-session is scoped to the exact action parameters", async () => {
     const bridge = new ToolApprovalBridge();
     const bus = mockEventBus();
     const sessionKey = "agent:default:a2a:ctx-3";
@@ -102,17 +102,18 @@ describe("ToolApprovalBridge", () => {
       sessionKey,
       timeoutMs: 5_000,
     });
-    bridge.resolve("x", "allow-always", "c1");
-    assert.equal(await first, "allow-always");
+    bridge.resolve("x", "allow-session", "c1");
+    assert.equal(await first, "allow-session");
 
-    const second = await bridge.requestApproval({
+    const second = bridge.requestApproval({
       toolName: "exec",
       params: { command: "echo 2" },
       toolCallId: "c2",
       sessionKey,
       timeoutMs: 5_000,
     });
-    assert.equal(second, "allow-always");
+    assert.equal(bridge.resolve("x", "allow-once", "c2"), true);
+    assert.equal(await second, "allow-once");
     bridge.unregisterStream("run-3");
   });
 
@@ -192,7 +193,7 @@ describe("ToolApprovalBridge", () => {
     bridge.unregisterStream("run-6");
   });
 
-  it("allow-always still publishes running on the A2A bus", async () => {
+  it("changed write target creates a new pending approval", async () => {
     const bridge = new ToolApprovalBridge();
     const bus = mockEventBus();
     const sessionKey = "agent:main:a2a:ctx-7";
@@ -215,15 +216,16 @@ describe("ToolApprovalBridge", () => {
     assert.equal(await first, "allow-always");
     bus.events.length = 0;
 
-    const second = await bridge.requestApproval({
+    const second = bridge.requestApproval({
       toolName: "write",
       params: { path: "b" },
       toolCallId: "call-7b",
       sessionKey,
       timeoutMs: 5_000,
     });
-    assert.equal(second, "allow-always");
-    assert.ok(bus.events.length >= 1, "expected running artifact for allow-always shortcut");
+    assert.ok(bus.events.length >= 2, "expected pending approval for changed target");
+    bridge.resolve("x", "allow-once", "call-7b");
+    assert.equal(await second, "allow-once");
     bridge.unregisterStream("run-7");
   });
 

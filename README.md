@@ -521,16 +521,17 @@ When enabled, the plugin registers `before_tool_call` and **awaits** an A2A clie
 | Path | Type | Default | Description |
 |------|------|---------|-------------|
 | `toolApproval.enabled` | boolean | `true` | Pause agent turn before tool calls |
-| `toolApproval.tools` | string[] | all tools | Only these tool names require approval (e.g. `["exec"]`) |
-| `toolApproval.timeoutMs` | number | `120000` | Deny if no decision arrives in time |
+| `toolApproval.tools` | string[] | legacy compatibility | Registry is authoritative: passive tools never require mutation approval; risky/unknown tools cannot bypass approval by omission. |
+| `toolApproval.timeoutMs` | number | `120000` | Return typed approval timeout without executing the mutation |
 
 Resume contract (same as BFF `SendToolApproval`): send an A2A message with empty text and
 
 ```json
-{ "metadata": { "toolApproval": { "approvalId": "<id>", "callId": "<optional>", "decision": "allow-once" } } }
+{ "metadata": { "toolApproval": { "approvalId": "<id>", "callId": "<optional>", "actionHash": "sha256:<...>", "decision": "allow-once" } } }
 ```
 
-`decision`: `allow-once` | `allow-always` | `deny`. Keep `timeouts.agentResponseTimeoutMs` greater than `toolApproval.timeoutMs`.
+`decision`: `allow-once` | `allow-session` | `allow-always` (legacy alias) | `deny`. Session approval is bound to the exact `actionHash`; changed parameters require a new approval. Without an active A2A surface, risky tools return `approval_unavailable`.
+Keep `timeouts.agentResponseTimeoutMs` greater than `toolApproval.timeoutMs`.
 
 ### Interrupt / stop agent run
 

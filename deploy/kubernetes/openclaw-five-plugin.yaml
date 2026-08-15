@@ -22,7 +22,9 @@ metadata:
   name: openclaw-five-plugin-env
   namespace: openclaw
 data:
-  OPENCLAW_JUDGE_PROFILE: shadow
+  OPENCLAW_JUDGE_PROFILE: supervised
+  OPENCLAW_JUDGE_A2A_HITL_REPLACE: "false"
+  OPENCLAW_JUDGE_MODEL_ID: Qwen/Qwen3.5-397B-A17B
   OPENCLAW_JUDGE_LOG_LEVEL: info
   NANGO_PROXY_URL: http://ai-assistant-nango-proxy.ai-assistant-nango-proxy.svc.cluster.local:8080
   EVOLUTION_PROJECT_ID: REPLACE_ME
@@ -139,7 +141,8 @@ data:
                 "token": "${A2A_TOKEN}"
               },
               "toolApproval": {
-                "enabled": false
+                "enabled": true,
+                "timeoutMs": 120000
               }
             }
           },
@@ -155,8 +158,8 @@ data:
               "allowConversationAccess": true
             },
             "config": {
-              "mode": "autonomous",
-              "enforcement": "shadow"
+              "mode": "supervised",
+              "enforcement": "enforce"
             }
           },
           "nango-proxy": {
